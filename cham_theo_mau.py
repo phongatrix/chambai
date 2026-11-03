@@ -35,13 +35,16 @@ import omr_prep as PREP
 from omr_key import detect_key_format
 
 ROOT = Path(__file__).resolve().parent
+# Mẫu giấy + đáp án nằm TRONG thư mục project (data/maugiay, data/dapan)
+# -> project mang đi đâu cũng chạy, không phụ thuộc đường dẫn tuyệt đối.
+ROOT_TPL = Path(__file__).resolve().parent / "data"
 DEFAULT_TPLS = {
-    "12": Path("/home/dell/Documents/tulieuchambai/maugiay/12.png"),
-    "10_11": Path("/home/dell/Documents/tulieuchambai/maugiay/10_11.png"),
+    "12": ROOT_TPL / "maugiay" / "12.png",
+    "10_11": ROOT_TPL / "maugiay" / "10_11.png",
 }
 DEFAULT_KEYS = {
-    "12": Path("/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
-    "10_11": Path("/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
+    "12": ROOT_TPL / "dapan" / "k12dapan.xlsx",
+    "10_11": ROOT_TPL / "dapan" / "k11dapan.xlsx",
 }
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 STATE_VI = {"ok": "đúng", "wrong": "sai", "blank": "trống", "multi": "tô nhiều"}
