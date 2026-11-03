@@ -603,12 +603,32 @@ def normalize_to_template(photo, tpl_path, scale=2.0, verify=True, paper=None,
     if verify:
         quad, _ = template_fiducials(tpl_path)
         cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
+        # ---- KIỂM CHỨNG BẰNG LƯỚI Ô ĐÁP ÁN (ICP) ----
+        # 4 mốc góc có thể bị che/mất (ảnh chụp gần, mốc mờ) -> cf chỉ 2-3/4
+        # dù warp vẫn ĐÚNG. Lưới ô đáp án (hàng trăm vòng tròn) là bằng chứng
+        # mạnh hơn nhiều: nếu >= 50 % tâm ô khớp vòng in thật thì nhận ảnh.
+        if cf < 1.0 and cells:
+            Hc, hit = refine_grid_by_cells(warped, cells, scale)
+            info["grid_hit"] = round(float(hit), 3)
+            if Hc is not None and hit >= 0.50:
+                M2 = Hc @ M
+                warped = cv2.warpPerspective(
+                    im2, M2, (int(Wt * scale), int(Ht * scale)),
+                    flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+                M = M2
+                info["M_final"] = M2
+                info["refined"] = True
+                cf = max(cf, float(hit))
+        cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
         ink = _ink_fraction(warped)
         info["corner"] = round(cf, 2)
         info["ink"] = round(ink, 3)
-        if cf < 1.0:
+        # Nhận ảnh nếu 4/4 mốc đúng HOẶC lưới ô đáp án khớp >= 50 %
+        if cf < 1.0 and float(info.get("grid_hit") or 0.0) < 0.50:
             info["reason"] = f"chỉ {int(cf * 4)}/4 ô định vị nằm đúng chỗ"
             return info
+        if cf < 1.0:
+            info["reason"] = ""            # warp đã được xác nhận bằng lưới ô
         if not (0.02 <= ink <= 0.50):
             info["reason"] = f"ảnh warp không giống phiếu (mực {ink:.1%})"
             return info

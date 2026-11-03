@@ -1004,8 +1004,8 @@ def _find_section_rows(img, lo=0.25, hi=0.90):
             else:
                 groups.append([y])
         ys = [float(np.median(gg)) for gg in groups if len(gg) >= 3]
-        if len(ys) >= 3:
-            return ys[:3]
+        if ys:
+            return ys
     return []
 
 
@@ -1195,16 +1195,15 @@ def render_result(photo, decided, detail, stats, out_path, paper, made=None,
         # nếu không dò được thì dùng hệ số đo sẵn.
         rows_sec = _find_section_rows(img)
         _dy = int(round(fs * 8))
-        if len(rows_sec) >= 3:
-            # CẢ BA dòng điểm nằm NGANG HÀNG TIÊU ĐỀ của phần mình (vùng bên
-            # phải nhãn "PHẦN …" luôn trống) -> đồng nhất P1/P2/P3.
-            y_sec1 = int(rows_sec[0]) + _dy
-            y_sec2 = int(rows_sec[1]) + _dy
-            y_sec3 = int(rows_sec[2]) + _dy
-        else:
-            y_sec1 = int(_SEC_FIXED_12["P1"] * Hh) + _dy
-            y_sec2 = int(_SEC_FIXED_12["P2"] * Hh) + _dy
-            y_sec3 = int(_SEC_FIXED_12["P3"] * Hh) + _dy
+        y_sec = {}
+        for key_, frac_ in _SEC_FIXED_12.items():
+            want = frac_ * Hh
+            near = [r for r in rows_sec if abs(r - want) <= 70]
+            # lấy cụm GẦN vị trí đo sẵn nhất (tránh cụm nhiễu sát bên dưới,
+            # vd hàng 449 ngay dưới tiêu đề PHẦN I)
+            y_sec[key_] = int(round(min(near, key=lambda r: abs(r - want)))) \
+                if near else int(round(want)) + _dy
+        y_sec1, y_sec2, y_sec3 = y_sec["P1"], y_sec["P2"], y_sec["P3"]
         for ln, xf, yf in (
             (p1_line, 0.163, y_sec1),
             (tong_line, 0.397, y_sec1),
