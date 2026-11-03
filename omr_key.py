@@ -164,17 +164,14 @@ def make_sample_list(n=18, path=None):
 
 def make_qr_png(payload):
     """Sinh ảnh QR (PNG bytes) cho payload (vd 'OMRKEY:abc123')."""
-    try:
-        import qrcode
-        qr = qrcode.QRCode(box_size=6, border=2)
-        qr.add_data(payload)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception:
-        return None
+    import qrcode
+    qr = qrcode.QRCode(box_size=6, border=2)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def decode_qr_image(img_bgr_or_bytes):

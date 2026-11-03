@@ -392,7 +392,15 @@ with tab_sheet:
             st.session_state["gdrive_stamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
             if report and len(report):
                 st.dataframe(report, width="stretch", hide_index=True)
-            st.success(f"Đã lấy {len(pages)} ảnh từ Google Drive.")
+            if len(pages):
+                st.success(f"Đã lấy {len(pages)} ảnh từ Google Drive.")
+            else:
+                loi = "; ".join(str(x.get("lỗi", ""))[:80] for x in report if x.get("lỗi"))
+                st.error("Không lấy được ảnh nào từ link. " +
+                         ("Lý do: " + loi if loi else
+                          "Hãy kiểm tra: ① link đúng chưa; ② file/thư mục đã chia sẻ "
+                          "'Bất kỳ ai có liên kết' chưa; ③ link trỏ tới ảnh/PDF chứ không phải "
+                          "tài liệu khác."))
         except Exception as e:                                   # noqa
             st.error(f"Lỗi khi lấy ảnh từ Google Drive: {e}")
     gdrive_files = st.session_state.get("gdrive_files") or []
@@ -720,10 +728,9 @@ with tab_key:
     if sel_ids:
         qr_id = sel_ids[0]
         qr_png = omr_key.make_qr_png(omr_key.QRCODE_PREFIX + qr_id)
-        if qr_png:
-            g1, g2 = st.columns(2)
-            g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
-            g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
+        g1, g2 = st.columns(2)
+        g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
+        g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
     qr_up = st.file_uploader("Upload/scan hình mã QR (thêm key vào bộ nạp)",
                              type=["png", "jpg", "jpeg"], key="qr_up")
     if qr_up and st.button("🔍 Đọc QR", key="qr_read"):

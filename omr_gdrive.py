@@ -49,8 +49,14 @@ def fetch_gdrive(url, dest=None):
             raise RuntimeError(f"Tải file Drive thất bại (id={fid}) — kiểm tra link công khai.")
         return kind, fid, Path(path).parent
     # folder
-    got = gdown.download_folder(id=fid, output=str(dest), quiet=False, use_cookies=False,
-                                remaining_ok=True)
+    # gdown 6.x đã bỏ kwarg `remaining_ok` (gặp lỗi "unexpected keyword
+    # argument 'remaining_ok'" với gdown 6.5.1) — gọi KHÔNG kwarg đó.
+    try:
+        got = gdown.download_folder(id=fid, output=str(dest), quiet=False,
+                                    use_cookies=False)
+    except TypeError:
+        got = gdown.download_folder(id=fid, output=str(dest), quiet=False,
+                                    use_cookies=False, remaining_ok=True)
     if not got:
         raise RuntimeError(f"Tải thư mục Drive thất bại (id={fid}) — kiểm tra link công khai.")
     return kind, fid, dest
