@@ -1,8 +1,13 @@
-streamlit>=1.35.0
+# Dependencies for Streamlit Community Cloud (fengcheck.streamlit.app)
+streamlit>=1.38.0
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
-openpyxl>=3.1.0
 pillow>=10.0.0
-pytesseract>=0.3.10
-qrcode>=7.4.2
+openpyxl>=3.1.0
 gdown>=5.0.0
+pandas>=2.0.0
+qrcode>=7.4.2
+
+# Ghi chú:
+#  - poppler-utils đã khai báo trong packages.txt
+#  - TensorFlow không cần thiết trên cloud (nhánh SBD viết tay dùng lazy import, tự bỏ qua nếu không có)

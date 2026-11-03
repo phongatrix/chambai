@@ -1,0 +1,13 @@
+# Cấu hình Streamlit cho app chấm trắc nghiệm (dùng cả local và Streamlit Cloud)
+[server]
+# Giới hạn ảnh upload một lần (MB) — ảnh điện thoại 3-8 MB nên 300 đủ dư
+maxUploadSize = 300
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#2E7D32"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7f5"
+textColor = "#1a1a1a"

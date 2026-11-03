@@ -26,28 +26,25 @@ BUILTIN_KEY_FILE = ROOT / "data/keys_builtin.json"
 st.title("📝 Hệ thống chấm trắc nghiệm bằng AI")
 
 
-@st.cache_data
-def load_builtin():
-    p = OUTDIR / "grading_final.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
-
-
 def load_registry():
+    """Nạp registry key; tự loại key hệ thống cũ (builtin-gk1) và key thiếu file."""
     reg = json.loads(REG.read_text(encoding="utf-8")) if REG.is_file() else {}
-    if BUILTIN_KEY_FILE.is_file() and "builtin-gk1" not in reg:
-        reg["builtin-gk1"] = {"file": "keys_builtin.json",
-                              "desc": "Key hệ thống suy từ 49 trang chuẩn (Tin GK1 26-27)",
-                              "ts": datetime.now().isoformat(timespec="seconds")}
+    changed = False
+    for kid in list(reg):
+        fname = str(reg[kid].get("file", ""))
+        f = KEY_DIR / fname
+        if kid == "builtin-gk1" or fname.endswith("builtin.json") or not f.is_file():
+            reg.pop(kid)
+            changed = True
+    if changed:
         REG.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
     return reg
 
 
 def load_key_data(kid, reg):
-    """Trả key_data cho id đã chọn (key hệ thống hoặc file upload)."""
+    """Trả key_data cho id đã chọn (file key_<id>.xlsx trong data/keys)."""
     if not kid:
         return None
-    if kid == "builtin-gk1" and BUILTIN_KEY_FILE.is_file():
-        return json.loads(BUILTIN_KEY_FILE.read_text(encoding="utf-8"))
     f = KEY_DIR / f"key_{kid}.xlsx"
     if f.is_file():
         _, key_data, _ = omr_key.detect_key_format(f)
@@ -71,6 +68,24 @@ def load_keys_multi(kids, reg):
         else:
             des[f"{kid}|list"] = {"p1": {int(k): v["answer"] for k, v in kd.get("câu", {}).items()},
                                    "p2": {}, "p3": {}}
+    return {"đề": "QM", "các đề": des} if des else None
+
+
+def merge_keys_grading(kids, reg):
+    """Gộp NHIỀU key đã chọn thành 1 key dùng cho CHẤM (luồng cham_theo_mau).
+
+    Khác load_keys_multi (cho lưới mẫu v3, tiền tố 'kid|đề'): ở đây các đề GIỮ
+    NGUYÊN mã (1132, 132...) để khớp với mã đề đọc từ lưới bubble; trùng mã đề
+    giữa các key thì lấy của key được chọn trước. Trả key_data hoặc None."""
+    if not kids:
+        return None
+    des = {}
+    for kid in kids:
+        kd = load_key_data(kid, reg)
+        if not kd or kd.get("đề") != "QM":
+            continue
+        for de, dk in kd["các đề"].items():
+            des.setdefault(str(de), dk)
     return {"đề": "QM", "các đề": des} if des else None
 
 
@@ -121,17 +136,19 @@ def grade_batch(pages, progress=None, key_data=None):
     return results
 
 
-def normalize_batch(paths, tpl_path, paper, key_file, out_dir, progress=None,
+def normalize_batch(paths, tpl_path, paper, key, out_dir, progress=None,
                     ink=True, ink_only=False):
     """Chuẩn hoá nhiều ảnh về đúng mẫu + NHẬN DẠNG & TÔ ĐEN bubble đã tô.
 
+    `key` = key_data đã nạp (dict có 'các đề') HOẶC đường dẫn file .xlsx.
     Trả (ok_paths, report_rows). Mỗi ảnh ghi 2 bản: *_chuan.jpg (dùng để chấm)
     và *_todam.jpg (bubble đã tô được tô đen để kiểm tra bằng mắt).
     """
     import omr_prep as PREP
     import cv2 as _cv
-    _fmt, _key, _ = omr_key.detect_key_format(key_file)
-    cells = CTM.keyed_cells(paper, tpl_path, _key)
+    if isinstance(key, (str, Path)):
+        _fmt, key, _ = omr_key.detect_key_format(key)
+    cells = CTM.keyed_cells(paper, tpl_path, key)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ok_paths, rows, ink_paths, extras = [], [], [], []
@@ -270,9 +287,9 @@ def save_run_db(source, results):
         st.warning(f"Lưu CSDL bỏ qua: {e}")
 
 
-tab_tpl, tab_sheet, tab_key, tab_db = st.tabs(
-    ["🎯 Mẫu giấy & lưới đáp án", "🟩 Chấm theo mẫu",
-     "📋 Đáp án & QR", "🗄️ Lịch sử CSDL"])
+tab_key, tab_sheet, tab_tpl = st.tabs(
+    ["📋 Đáp án & QR", "🟩 Chấm theo mẫu",
+     "🎯 Mẫu giấy & lưới đáp án"])
 
 # ---------------- TAB 0: MẪU GIẤY & LƯỚI ĐÁP ÁN ----------------
 with tab_tpl:
@@ -314,43 +331,52 @@ with tab_sheet:
     import omr_sheetgrid as SG
     import cham_theo_mau as CTM
 
-    st.markdown("**Quy trình:** chọn mẫu giấy → nạp đáp án → tải ảnh → hệ thống "
-                "khớp ảnh với mẫu bằng **ô đen định vị**, đọc SBD/Mã đề, đối chiếu bubble.")
+    st.markdown("**Quy trình:** chọn mẫu giấy → chọn đáp án (tab 📋 Đáp án & QR) → "
+                "tải ảnh → hệ thống khớp ảnh với mẫu bằng **ô đen định vị**, "
+                "đọc SBD/Mã đề, đối chiếu bubble.")
     st.caption("🟢 đúng · 🔴 sai · 🟡 trống hoặc tô nhiều đáp án")
 
     TPL_CHOICES = {
         "12": ("Mẫu THPT 12.png (40 câu ABCD + 8 Đ/S)",
-               str(ROOT / "data" / "maugiay" / "12.png"),
-               str(ROOT / "data" / "dapan" / "k12dapan.xlsx")),
+               str(ROOT / "data" / "maugiay" / "12.png")),
         "10_11": ("Mẫu QM 10_11.png (30 câu ABCD + 10 Đ/S)",
-                  str(ROOT / "data" / "maugiay" / "10_11.png"),
-                  str(ROOT / "data" / "dapan" / "k11dapan.xlsx")),
+                  str(ROOT / "data" / "maugiay" / "10_11.png")),
     }
+    # ② ĐÁP ÁN = key đã CHỌN ở tab '📋 Đáp án & QR' (bảng 'Các đáp án đã lưu')
+    reg_s = load_registry()
+    kids_sel = [k for k in (st.session_state.get("key_ids") or []) if k in reg_s]
+    key_names = [str(reg_s[k].get("name") or reg_s[k].get("desc") or k)
+                 for k in kids_sel]
+    _key_sel = merge_keys_grading(kids_sel, reg_s)
     c_paper, c_keyf = st.columns([1, 2])
     with c_paper:
         paper = st.selectbox("① Mẫu giấy:", list(TPL_CHOICES),
                              format_func=lambda k: TPL_CHOICES[k][0])
     tpl_path = TPL_CHOICES[paper][1]
     with c_keyf:
-        key_file = st.text_input("② File đáp án (.xlsx):", value=TPL_CHOICES[paper][2])
+        if key_names:
+            st.markdown("**② Đáp án đã chọn:**  \n" + " · ".join(key_names))
+        else:
+            st.warning("② Chưa chọn đáp án — chọn dòng trong bảng "
+                       "'Các đáp án đã lưu' ở tab '📋 Đáp án & QR'.")
 
     if not Path(tpl_path).is_file():
         st.error(f"Không thấy ảnh mẫu: {tpl_path}")
-    elif not Path(key_file).is_file():
-        st.error(f"Không thấy file đáp án: {key_file}")
+    elif _key_sel is None:
+        st.info("Hãy upload Excel đáp án và CHỌN DÒNG key ở tab '📋 Đáp án & QR' "
+                "— lần chấm sẽ dùng đúng đáp án đã chọn.")
     else:
         try:
-            _fmt, _key, _desc = omr_key.detect_key_format(key_file)
             cells = SG.build_template_cells(paper, tpl_path)
             id_cells = SG.build_id_cells(paper, tpl_path)
             cc1, cc2, cc3, cc4 = st.columns(4)
-            cc1.metric("Số đề trong key", len(_key["các đề"]))
+            cc1.metric("Số đề trong key", len(_key_sel["các đề"]))
             cc2.metric("Ô PHẦN I", len([c for c in cells if c[0] == "P1"]))
             cc3.metric("Ô PHẦN II", len([c for c in cells if c[0] == "P2"]))
             cc4.metric("Ô SBD/Mã đề", len(id_cells))
-            st.caption(f"Key: {_desc}")
-            de0 = list(_key["các đề"])[0]
-            g0 = SG.build_answer_grid(paper, tpl_path, _key["các đề"][de0])
+            st.caption(f"Đáp án: {', '.join(key_names)}")
+            de0 = list(_key_sel["các đề"])[0]
+            g0 = SG.build_answer_grid(paper, tpl_path, _key_sel["các đề"][de0])
             rows0 = [{"phần": p, "câu": (q if isinstance(q, int) else f"{q[0]}{q[1]}"),
                       "lựa chọn": o, "đáp án": g0["answers"].get((p, q, o)),
                       "toạ độ mẫu": f"({x:.0f},{y:.0f})"}
@@ -415,14 +441,14 @@ with tab_sheet:
     # Nguồn ảnh = ảnh upload + ảnh đã lấy từ Google Drive
     gdrive_files = st.session_state.get("gdrive_files") or []
     prep_ready = (files_s or gdrive_files) and Path(tpl_path).is_file() \
-        and Path(key_file).is_file()
+        and _key_sel is not None
     with st.expander("⓪ Ảnh đã chuẩn hoá & tô đậm bubble (bấm dòng để so sánh)",
                      expanded=bool(files_s or gdrive_files)):
         if not prep_ready:
             st.info("Tải ảnh lên / dán link Google Drive và chọn mẫu giấy + đáp án để bắt đầu.")
         else:
             sig = (tuple((u.name, len(u.getvalue())) for u in files_s),
-                   tuple(gdrive_files), paper, key_file, bool(norm_on))
+                   tuple(gdrive_files), paper, tuple(kids_sel), bool(norm_on))
             if st.session_state.get("prep_sig") != sig:
                 stamp_n = datetime.now().strftime("%Y%m%d_%H%M%S")
                 destn = SHEET_DIR / f"norm_{stamp_n}"
@@ -438,7 +464,7 @@ with tab_sheet:
                                  text=("Đang chuẩn hoá & tô đậm..." if norm_on
                                        else "Đang tô đậm bubble..."))
                 ok_paths, rep, ink_paths, extras = normalize_batch(
-                    pths, tpl_path, paper, key_file, destn / "chuan_hoa", pr,
+                    pths, tpl_path, paper, _key_sel, destn / "chuan_hoa", pr,
                     ink_only=not norm_on)
                 pr.empty()
                 st.session_state["prep_sig"] = sig
@@ -495,7 +521,7 @@ with tab_sheet:
         run = st.button("▶️ Chấm theo mẫu", type="primary", key="sheet_run",
                     disabled=not ((files_s or gdrive_files)
                                   and Path(tpl_path).is_file()
-                                  and Path(key_file).is_file()
+                                  and _key_sel is not None
                                   and st.session_state.get("prep_res")))
     if run:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -514,7 +540,7 @@ with tab_sheet:
             use = ink_p if (ink_p and Path(ink_p).is_file()) else ok_p
             paths.append(Path(use))
             path_ok.append(True)
-        _fmt, _key, _ = omr_key.detect_key_format(key_file)
+        _key = _key_sel
         prog = st.progress(0.0, text="Đang khớp mẫu...")
         outd = OUTDIR / "theo_mau" / f"web_{stamp}"
         outd.mkdir(parents=True, exist_ok=True)
@@ -690,9 +716,14 @@ with tab_sheet:
 
 # ---------------- TAB 2: ĐÁP ÁN & QR ----------------
 with tab_key:
-    st.markdown("**1) Upload Excel đáp án** hoặc dùng **key hệ thống** — "
-                "**2) sinh/quét QR** — **3) chọn key** rồi chấm bài ở tab Google Drive.")
+    st.markdown("**1) Đặt tên + Upload Excel đáp án** — **2) sinh/quét QR** — "
+                "**3) chọn dòng key** rồi chấm bài ở tab '🟩 Chấm theo mẫu'.")
     reg = load_registry()
+
+    # ---- 1. TÊN ĐÁP ÁN + UPLOAD ----
+    ten_dap_an = st.text_input(
+        "Tên đáp án (thể hiện đáp án của kỳ kiểm tra nào):",
+        key="key_name", placeholder="vd: Tin học 12 - Giữa kỳ 1 - 2026-2027")
     up_files = st.file_uploader("Upload NHIỀU file Excel đáp án (k10, k11, k12...)",
                                 type=["xlsx", "xls"], key="key_up",
                                 accept_multiple_files=True)
@@ -709,22 +740,66 @@ with tab_key:
             kid = hashlib.sha1(tmp.read_bytes()).hexdigest()[:8]
             dst = KEY_DIR / f"key_{kid}.xlsx"
             tmp.rename(dst)
-            reg[kid] = {"file": dst.name, "desc": desc,
+            # Tên hiển thị: nhập tay > tên file; nếu upload nhiều file một lần
+            # thì ghép thêm tên file để các dòng không trùng nhau
+            if ten_dap_an.strip() and len(up_files) == 1:
+                kname = ten_dap_an.strip()
+            elif ten_dap_an.strip():
+                kname = f"{ten_dap_an.strip()} [{Path(up.name).stem}]"
+            else:
+                kname = Path(up.name).stem
+            reg[kid] = {"file": dst.name, "desc": desc, "name": kname,
                         "ts": datetime.now().isoformat(timespec="seconds")}
             n_ok += 1
         if n_ok:
             REG.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
             st.session_state["key_ids"] = list(reg.keys())
+            # chọn sẵn toàn bộ các dòng trong bảng key
+            st.session_state["key_tbl"] = {"selection": {"rows":
+                                             list(range(len(reg)))}}
             st.success(f"Đã lưu {n_ok} key — mặc định nạp TẤT CẢ vào lần chấm.")
-    st.markdown("**Các key có sẵn** (chọn nhiều — hệ thống gộp tất cả đề của mọi key "
-                "và tự khớp từng bài với đề phù hợp nhất):")
-    opts = {kid: f"{kid} — {v['desc'][:60]}" for kid, v in reg.items()}
-    sel_ids = st.multiselect("Key đang nạp:", list(opts),
-                             default=st.session_state.get("key_ids") or list(opts),
-                             format_func=lambda k: opts.get(k, k))
-    st.session_state["key_ids"] = sel_ids
-    if sel_ids:
-        qr_id = sel_ids[0]
+
+    # ---- 2. BẢNG KEY ĐÃ LƯU (TT | Tên đáp án | Ngày tạo) ----
+    st.markdown("**Các đáp án đã lưu** (chọn các dòng để nạp vào lần chấm):")
+    kids = list(reg.keys())
+
+    def _fmt_ts(ts):
+        try:
+            return datetime.fromisoformat(ts).strftime("%d/%m/%Y %H:%M") if ts else "-"
+        except Exception:                                        # noqa
+            return ts or "-"
+
+    df_rows = [{"TT": i + 1,
+                "Tên đáp án": reg[k].get("name") or reg[k].get("desc") or k,
+                "Ngày tạo": _fmt_ts(reg[k].get("ts", ""))}
+               for i, k in enumerate(kids)]
+    ev = st.dataframe(df_rows, width="stretch", hide_index=True,
+                      on_select="rerun", selection_mode="multi-row",
+                      key="key_tbl")
+    sel = list(ev.selection.rows)
+    if sel:
+        st.session_state["key_ids"] = [kids[i] for i in sel]
+    else:
+        st.session_state["key_ids"] = []
+    c_tbl1, c_tbl2, _c = st.columns([1, 1, 2])
+    if sel and c_tbl1.button("🗑 Xoá key đã chọn", key="key_del"):
+        for i in sel:
+            kid_d = kids[i]
+            f_d = KEY_DIR / str(reg[kid_d].get("file", f"key_{kid_d}.xlsx"))
+            if f_d.name.startswith("key_") and f_d.is_file():
+                f_d.unlink(missing_ok=True)
+            reg.pop(kid_d, None)
+        REG.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+        st.session_state.pop("key_tbl", None)
+        st.session_state["key_ids"] = []
+        st.rerun()
+    if sel:
+        c_tbl2.caption(f"Đang nạp {len(sel)} key — dùng cho lần chấm tới.")
+
+    # ---- 3. QR ----
+    key_ids = st.session_state.get("key_ids") or []
+    if key_ids:
+        qr_id = key_ids[0]
         qr_png = omr_key.make_qr_png(omr_key.QRCODE_PREFIX + qr_id)
         g1, g2 = st.columns(2)
         g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
@@ -740,26 +815,12 @@ with tab_key:
                 if kid not in cur:
                     cur = cur + [kid]
                 st.session_state["key_ids"] = cur
-                st.success(f"Đã thêm key `{kid}` từ QR: {reg[kid]['desc']}")
+                st.success(f"Đã thêm key `{kid}` từ QR: "
+                           f"{reg[kid].get('name') or reg[kid]['desc']}")
             else:
                 st.error(f"QR trỏ key `{kid}` chưa có trong máy.")
         else:
             st.error("Không đọc được QR (payload phải là OMRKEY:...)")
 
 # ---------------- TAB 3: GOOGLE DRIVE ----------------
-# ---------------- TAB 4: CSDL ----------------
-with tab_db:
-    from omr_db import list_runs, show_run
-    runs = list_runs()
-    if not runs:
-        st.info("Chưa có lần chấm nào trong CSDL.")
-    else:
-        st.dataframe([{"Run": r[0], "Thời gian": r[1], "Nguồn": r[2],
-                       "Số trang": r[3], "Số khớp": str(r[4]) if r[4] is not None else "-"}
-                      for r in runs], width="stretch", hide_index=True)
-        rid = st.selectbox("Xem chi tiết run:", [r[0] for r in runs],
-                           format_func=lambda x: f"Run {x}")
-        _, pages = show_run(rid)
-        st.dataframe([{"STT": p[0], "File": p[1], "Mã đề": p[2] or "-", "SBD": p[3] or "-",
-                       "P1": p[4], "P2": p[5], "P3": p[6], "Tổng": p[7], "KQ": p[8]}
-                      for p in pages], width="stretch", hide_index=True)
+# (đã bỏ tab "Lịch sử CSDL" theo yêu cầu — kết quả vẫn lưu vào CSDL qua save_run_db)

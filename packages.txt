@@ -1,4 +1,2 @@
-tesseract-ocr
-tesseract-ocr-vie
+# System packages for Streamlit Community Cloud (apt) — cài tự động khi deploy
 poppler-utils
-libgl1

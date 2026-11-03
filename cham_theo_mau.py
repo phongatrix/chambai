@@ -58,8 +58,19 @@ def load_key(path):
 
 
 def keyed_cells(paper, tpl_path, key, de=None):
-    """Chỉ các ô CÓ đáp án trong key (đủ lựa chọn của mỗi câu)."""
-    de = de if de in key["các đề"] else list(key["các đề"].keys())[0]
+    """Chỉ các ô CÓ đáp án trong key (đủ lựa chọn của mỗi câu).
+
+    de=None: lấy HỢP các ô của TẤT CẢ đề — khi gộp nhiều key/đề có số câu khác
+    nhau, không bỏ sót ô của đề dài hơn."""
+    if de is None:
+        seen, out = set(), []
+        for d_ in key["các đề"].values():
+            grid = S.build_answer_grid(paper, tpl_path, d_)
+            for c in grid["cells"]:
+                if grid["answers"].get((c[0], c[1], c[2])) and c not in seen:
+                    seen.add(c)
+                    out.append(c)
+        return out
     grid = S.build_answer_grid(paper, tpl_path, key["các đề"][de])
     return [c for c in grid["cells"] if grid["answers"].get((c[0], c[1], c[2]))]
 
@@ -160,7 +171,39 @@ def _finish_grade(ph, H, cells, key, paper, made, thresh, ids, q,
                     unkeyed.append((part_, cau_, opt_, round(float(v[0]), 2)))
     except Exception:                                          # noqa
         pass
+
+    # --- SBD dự phòng bằng CHỮ SỐ VIẾT TAY (CNN) khi lưới bubble không đọc
+    #     được chuỗi số: bubble trước, viết tay sau (chỉ mẫu 12, ảnh đã warp) ---
+    written = None
+    if paper == "12" and not sbd:
+        try:
+            Hm = np.asarray(H, np.float64)
+            sc = float(Hm[0, 0])
+            # ô viết tay chỉ khớp khi H là thuần tỉ lệ (ảnh đã warp hệ mẫu)
+            ok_h = (abs(Hm[0, 1]) + abs(Hm[1, 0])
+                    + abs(Hm[0, 2]) + abs(Hm[1, 2])) < 1e-6
+            tpl_ck = cv2.imread(str(tpl_path))
+            ok_size = (tpl_ck is not None
+                       and abs(ph.shape[1] - sc * tpl_ck.shape[1])
+                       <= max(6.0, 0.02 * ph.shape[1]))
+            if ok_h and ok_size:
+                import omr_ocr as O
+                if O._get_cnn() is not None:
+                    written = O.read_written_ids(ph, tpl_path, paper,
+                                                 scale=sc, force=True)
+                    s_w = (written or {}).get("SBD")
+                    if s_w and len(s_w) >= 4:
+                        sbd = s_w
+                        ids_full = dict(ids_full) if ids_full else {}
+                        ids_full["sbd_written"] = True
+                    else:
+                        written = None
+        except Exception:                                        # noqa
+            written = None
+    sbd_source = ("viết tay" if (ids_full or {}).get("sbd_written")
+                  else ("bubble" if sbd else "không có"))
     return {"photo": str(photo_path), "paper": paper, "made": use_de,
+            "sbd_source": sbd_source,
             "pre_norm": None if pre is None else {"ok": pre["ok"],
                                                   "quality": pre["quality"],
                                                   "rot": pre["rot"],

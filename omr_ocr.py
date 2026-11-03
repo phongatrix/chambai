@@ -10,17 +10,152 @@ Quy trình:
   1. Dò 12 ô trên ẢNH MẪU (đường kẻ dọc trong dải ngay trên lưới ID).
   2. Trên ảnh đã chuẩn hoá: cắt từng ô (bỏ viền), phóng to, chuẩn hoá sáng,
      nhị phân Otsu.
-  3. Tesseract (psm 10 = một ký tự, whitelist 0-9) -> chữ số + độ tin cậy.
+  3. CNN (digit_cnn.keras, huấn luyện từ phiếu thật) -> chữ số + độ tin cậy;
+     Tesseract chỉ là dự phòng khi bật ENABLED=True.
   4. Ô trống (mực quá ít hoặc conf thấp) -> bỏ.
 """
 from __future__ import annotations
+
+import cv2
+import numpy as np
+from pathlib import Path
+
+# ---- hàm cắt/tách nét chữ số (dùng chung với omr_cnn) ----
+def crop_writing(warped, box, scale=2.0, margin=0.10):
+    """Cắt vùng viết tay trong 1 ô (đã bỏ viền ô bằng margin)."""
+    x0 = int(round(box["x0"] * scale))
+    x1 = int(round(box["x1"] * scale))
+    y0 = int(round(box["y0"] * scale))
+    y1 = int(round(box["y1"] * scale))
+    H, W = warped.shape[:2]
+    x0, x1 = max(0, x0), min(W, x1)
+    y0, y1 = max(0, y0), min(H, y1)
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return None
+    mx = int((x1 - x0) * margin)
+    my = int((y1 - y0) * margin)
+    roi = warped[y0 + my:y1 - my, x0 + mx:x1 - mx]
+    if roi.size == 0:
+        return None
+    g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    # chuẩn hoá sáng theo phân vị 90 (khử khác biệt giữa các trang)
+    g = np.clip(g / (float(np.percentile(g, 90)) + 1e-6) * 255.0, 0, 255)
+    return g.astype(np.uint8)
+
+
+def extract_stroke(roi_gray, min_ink=0.008):
+    """Tách NÉT CHỮ: nhị phân thích ứng -> xoá viền (flood-fill 4 góc) ->
+    thành phần lớn nhất -> bbox có đệm. Trả (ảnh nét đen/trắng, ink_ratio)."""
+    big = cv2.resize(roi_gray, None, fx=8.0, fy=8.0, interpolation=cv2.INTER_CUBIC)
+    big = cv2.GaussianBlur(big, (5, 5), 0)
+    bw = cv2.adaptiveThreshold(big, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY_INV, 41, 12)
+    ink = float((bw > 0).mean())
+    if ink < min_ink:
+        return None, ink
+    # xoá viền ô: mọi nét nối với mép là đường kẻ khung
+    ff = bw.copy()
+    hh, ww = ff.shape
+    mask = np.zeros((hh + 2, ww + 2), np.uint8)
+    for pt in ((0, 0), (ww - 1, 0), (0, hh - 1), (ww - 1, hh - 1)):
+        cv2.floodFill(ff, mask, pt, 0)
+    cs, _ = cv2.findContours(ff, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return None, ink
+    c = max(cs, key=cv2.contourArea)
+    bx, by, bw_, bh_ = cv2.boundingRect(c)
+    if bw_ < 0.15 * ww or bh_ < 0.15 * hh:
+        return None, ink
+    # ghép cả các thành phần chồng lên bbox của nét chính (vd dấu phẩy chữ số)
+    sel = np.zeros_like(ff)
+    for cc in cs:
+        x, y, w2, h2 = cv2.boundingRect(cc)
+        if (x < bx + bw_ and x + w2 > bx and y < by + bh_ and y + h2 > by):
+            sel[y:y + h2, x:x + w2] = np.maximum(sel[y:y + h2, x:x + w2],
+                                                 ff[y:y + h2, x:x + w2])
+    if not sel.any():
+        return None, ink
+    ys, xs = np.nonzero(sel)
+    y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+    digit = 255 - sel[y0:y1 + 1, x0:x1 + 1]
+    return digit, ink
+
+
+def to_input(digit_img, img=48):
+    """Chuyển nét chữ về kích thước input CNN (giữ tỉ lệ, căn giữa)."""
+    hh, ww = digit_img.shape[:2]
+    side = max(hh, ww)
+    canvas = np.full((side, side), 255, np.uint8)
+    y0 = (side - hh) // 2
+    x0 = (side - ww) // 2
+    canvas[y0:y0 + hh, x0:x0 + ww] = digit_img
+    out = cv2.resize(canvas, (img, img), interpolation=cv2.INTER_AREA)
+    x = out.astype(np.float32) / 255.0
+    return x[..., None]          # (IMG, IMG, 1)
+
+
+def augment(img48, rng=None):
+    """Tăng cường 1 mẫu: xoay/dời/tỉ lệ/độ sáng (trả list mẫu mới)."""
+    rng = rng or np.random.default_rng(0)
+    outs = []
+    h = img48.shape[0]
+    for ang in (-8, -4, 0, 4, 8):
+        M = cv2.getRotationMatrix2D((h / 2, h / 2), ang, 1.0)
+        for dx in (-2, 0, 2):
+            for dy in (-2, 0, 2):
+                M2 = M.copy()
+                M2[0, 2] += dx
+                M2[1, 2] += dy
+                a = cv2.warpAffine(img48, M2, (h, h), flags=cv2.INTER_LINEAR,
+                                   borderValue=1.0)
+                gain = rng.uniform(0.85, 1.15)
+                a = np.clip((a - 0.5) * gain + 0.5, 0, 1)
+                outs.append(a)
+    return outs
+
+
+# ---------- 2. thu thập dữ liệu có nhãn ----------
+
+
 
 # ⚠️ MẶC ĐỊNH TẮT: Tesseract trên ô số rất nhỏ của bản photocopy đang cho kết
 # quả sai (đọc ô trống thành "7"). Bật lại chỉ sau khi hiệu chuẩn/huấn luyện.
 ENABLED = False
 
-import cv2
-import numpy as np
+# CNN chữ số viết tay (omr_cnn.train_model): nếu đã có model thì dùng CNN
+# thay Tesseract — ổn định hơn nhiều trên nét mờ/bản photocopy.
+MODEL_NAME_CNN = "digit_cnn.keras"
+_CNN = {"model": None, "tried": False}
+
+
+def _predict_digit(digit_img):
+    """Dự đoán chữ số: CNN (nếu có model) -> (digit|None, conf)."""
+    cnn = _get_cnn()
+    if cnn is not None:
+        try:
+            d, c = cnn.predict(digit_img)
+            if c >= 0.55:
+                return d, c
+            return None, c
+        except Exception:                                        # noqa
+            pass
+    return None, 0.0
+
+
+def _get_cnn():
+    """Nạp model CNN 1 lần (trả None nếu chưa huấn luyện)."""
+    if _CNN["tried"]:
+        return _CNN["model"]
+    _CNN["tried"] = True
+    try:
+        from omr_cnn import DigitCNN
+        mp = Path(__file__).resolve().parent / "data" / "models" / MODEL_NAME_CNN
+        if mp.is_file():
+            _CNN["model"] = DigitCNN(mp)
+    except Exception:                                            # noqa
+        _CNN["model"] = None
+    return _CNN["model"]
+
 
 _BOX_CACHE = {}
 
@@ -161,6 +296,13 @@ def _ocr_one(warped, box, scale, up=8.0, margin=0.30):
     if not (0.18 <= bwid / float(bhei) <= 1.05):
         return None, 0.0, ink
     digit_img = 255 - ff[by:by + bhei, bx:bx + bwid]
+    # Ưu tiên CNN (digit_cnn.keras) — bền hơn Tesseract trên bản photocopy/nét mờ
+    d, c = _predict_digit(digit_img)
+    if d is not None:
+        return str(d), float(c), ink
+    if not ENABLED:
+        return None, max(0.0, float(c)), ink
+    # dự phòng Tesseract (chỉ khi ENABLED=True — xem ghi chú đầu file)
     hh, ww = digit_img.shape
     side = max(hh, ww)
     canvas = np.full((side, side), 255, np.uint8)

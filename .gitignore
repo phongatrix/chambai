@@ -1,27 +1,26 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# ---- KHÔNG đẩy dữ liệu chạy cục bộ / môi trường lên GitHub ----
 
-# Virtual environments
+# Môi trường Python cục bộ (2.9 GB!)
 .venv/
 venv/
-ENV/
-env/
-
-# Tools & agent internal cache
 .tools/
 .agents/
 
-# Output generated files (preserve output directory)
-output/*
-!output/.gitkeep
+# Cache Python
+__pycache__/
+*.pyc
 
-# Logs and databases journals
-*.log
-*.db-journal
-*.db-wal
+# Dữ liệu runtime (quá lớn, sinh khi chạy app)
+output/
+data/web_upload/
+data/scan_pages/
+data/scan_pages_gdrive/
+data/gdrive_in/
 
-# OS files
+# File hệ điều hành / editor
 .DS_Store
-Thumbs.db
+*.swp
+*.swo
+
+# Git lock/tmp
+*.orig
