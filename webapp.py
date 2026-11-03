@@ -272,9 +272,9 @@ def save_run_db(source, results):
         st.warning(f"Lưu CSDL bỏ qua: {e}")
 
 
-tab_tpl, tab_sheet, tab_key, tab_gdrive, tab_db = st.tabs(
+tab_tpl, tab_sheet, tab_key, tab_db = st.tabs(
     ["🎯 Mẫu giấy & lưới đáp án", "🟩 Chấm theo mẫu (fiducial)",
-     "📋 Đáp án & QR", "🔗 Google Drive", "🗄️ Lịch sử CSDL"])
+     "📋 Đáp án & QR", "🗄️ Lịch sử CSDL"])
 
 # ---------------- TAB 0: MẪU GIẤY & LƯỚI ĐÁP ÁN ----------------
 with tab_tpl:
@@ -321,10 +321,12 @@ with tab_sheet:
     st.caption("🟢 đúng · 🔴 sai · 🟡 trống hoặc tô nhiều đáp án")
 
     TPL_CHOICES = {
-        "12": ("Mẫu THPT 12.png (40 câu ABCD + 8 Đ/S)", "/home/dell/Documents/tulieuchambai/maugiay/12.png",
-               "/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
-        "10_11": ("Mẫu QM 10_11.png (30 câu ABCD + 10 Đ/S)", "/home/dell/Documents/tulieuchambai/maugiay/10_11.png",
-                  "/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
+        "12": ("Mẫu THPT 12.png (40 câu ABCD + 8 Đ/S)",
+               str(ROOT / "data/maugiay/12.png") if (ROOT / "data/maugiay/12.png").is_file() else "/home/dell/Documents/tulieuchambai/maugiay/12.png",
+               str(ROOT / "data/dapan/k12dapan.xlsx") if (ROOT / "data/dapan/k12dapan.xlsx").is_file() else "/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
+        "10_11": ("Mẫu QM 10_11.png (30 câu ABCD + 10 Đ/S)",
+                  str(ROOT / "data/maugiay/10_11.png") if (ROOT / "data/maugiay/10_11.png").is_file() else "/home/dell/Documents/tulieuchambai/maugiay/10_11.png",
+                  str(ROOT / "data/dapan/k11dapan.xlsx") if (ROOT / "data/dapan/k11dapan.xlsx").is_file() else "/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
     }
     c_paper, c_keyf = st.columns([1, 2])
     with c_paper:
@@ -373,6 +375,27 @@ with tab_sheet:
                                key=f"sheet_files_{round_no}",
                                type=["jpg", "jpeg", "png", "bmp", "webp"],
                                accept_multiple_files=True)
+    gdrive_files = st.session_state.get("gdrive_files") or []
+    gdrive_links = st.text_area(
+        "🔗 Link Google Drive (mỗi link một dòng — lấy TẤT CẢ file ảnh trong link, gồm thư mục con)",
+        value="", key="sheet_gdrive_links", height=90,
+        placeholder="https://drive.google.com/drive/folders/...")
+    if st.button("📥 Lấy ảnh từ Google Drive", key="gd_fetch",
+                 disabled=not gdrive_links.strip()):
+        from omr_gdrive import scan_links
+        prog = st.progress(0.0, text="Đang lấy ảnh từ Google Drive...")
+        try:
+            pages, report = scan_links(gdrive_links, prog)
+            prog.empty()
+            st.session_state["gdrive_files"] = [str(x) for x in pages]
+            st.session_state["gdrive_report"] = report
+            st.session_state["gdrive_stamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if report and len(report):
+                st.dataframe(report, width="stretch", hide_index=True)
+            st.success(f"Đã lấy {len(pages)} ảnh từ Google Drive.")
+        except Exception as e:                                   # noqa
+            st.error(f"Lỗi khi lấy ảnh từ Google Drive: {e}")
+    gdrive_files = st.session_state.get("gdrive_files") or []
     c_made, c_btn = st.columns([1, 2])
     with c_made:
         fixed_made = st.text_input("Mã đề (bỏ trống = tự chọn)", value="", key="sheet_made")
@@ -383,23 +406,28 @@ with tab_sheet:
              "(cùng kích thước, cùng góc) rồi mới chấm. Ảnh nào không khớp mẫu sẽ bị báo, "
              "không bao giờ chuẩn hoá bừa.")
     # ---- ⓪ TIỀN XỬ LÝ TỰ ĐỘNG: chuẩn hoá + nhận dạng & TÔ ĐEN bubble ----
-    prep_ready = files_s and Path(tpl_path).is_file() and Path(key_file).is_file()
+    # Nguồn ảnh = ảnh upload + ảnh đã lấy từ Google Drive
+    gdrive_files = st.session_state.get("gdrive_files") or []
+    prep_ready = (files_s or gdrive_files) and Path(tpl_path).is_file() \
+        and Path(key_file).is_file()
     with st.expander("⓪ Ảnh đã chuẩn hoá & tô đậm bubble (bấm dòng để so sánh)",
-                     expanded=bool(files_s)):
+                     expanded=bool(files_s or gdrive_files)):
         if not prep_ready:
-            st.info("Tải ảnh lên và chọn mẫu giấy + đáp án để bắt đầu.")
+            st.info("Tải ảnh lên / dán link Google Drive và chọn mẫu giấy + đáp án để bắt đầu.")
         else:
             sig = (tuple((u.name, len(u.getvalue())) for u in files_s),
-                   paper, key_file, bool(norm_on))
+                   tuple(gdrive_files), paper, key_file, bool(norm_on))
             if st.session_state.get("prep_sig") != sig:
                 stamp_n = datetime.now().strftime("%Y%m%d_%H%M%S")
                 destn = SHEET_DIR / f"norm_{stamp_n}"
                 destn.mkdir(parents=True, exist_ok=True)
                 pths = []
-                for u in files_s:
+                for u in files_s:                      # ảnh upload
                     q = destn / u.name
                     q.write_bytes(u.getvalue())
                     pths.append(q)
+                for gp in gdrive_files:                # ảnh đã lấy từ Drive
+                    pths.append(Path(gp))
                 pr = st.progress(0.0,
                                  text=("Đang chuẩn hoá & tô đậm..." if norm_on
                                        else "Đang tô đậm bubble..."))
@@ -453,12 +481,14 @@ with tab_sheet:
                      help="Xoá kết quả đợt hiện tại và nạp ảnh của đợt mới; "
                           "giữ nguyên mẫu giấy + đáp án đã chọn."):
             st.session_state["round_no"] = st.session_state.get("round_no", 0) + 1
-            for k_ in ("sheet_res", "prep_res", "prep_sig"):
+            for k_ in ("sheet_res", "prep_res", "prep_sig",
+                       "gdrive_files", "gdrive_report"):
                 st.session_state.pop(k_, None)
             st.rerun()
     with c_run:
         run = st.button("▶️ Chấm theo mẫu", type="primary", key="sheet_run",
-                    disabled=not (files_s and Path(tpl_path).is_file()
+                    disabled=not ((files_s or gdrive_files)
+                                  and Path(tpl_path).is_file()
                                   and Path(key_file).is_file()
                                   and st.session_state.get("prep_res")))
     if run:
@@ -690,9 +720,10 @@ with tab_key:
     if sel_ids:
         qr_id = sel_ids[0]
         qr_png = omr_key.make_qr_png(omr_key.QRCODE_PREFIX + qr_id)
-        g1, g2 = st.columns(2)
-        g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
-        g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
+        if qr_png:
+            g1, g2 = st.columns(2)
+            g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
+            g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
     qr_up = st.file_uploader("Upload/scan hình mã QR (thêm key vào bộ nạp)",
                              type=["png", "jpg", "jpeg"], key="qr_up")
     if qr_up and st.button("🔍 Đọc QR", key="qr_read"):
@@ -711,69 +742,6 @@ with tab_key:
             st.error("Không đọc được QR (payload phải là OMRKEY:...)")
 
 # ---------------- TAB 3: GOOGLE DRIVE ----------------
-with tab_gdrive:
-    st.markdown("Nhập **mỗi link một dòng** (Drive công khai hoặc `dir:<thư mục>`). "
-                "Bấm **Quét** để lấy toàn bộ hình trong link (gồm thư mục con).")
-    links_text = st.text_area("Các link:", height=110,
-                              placeholder="https://drive.google.com/drive/folders/...\nhttps://drive.google.com/file/d/...")
-    if st.button("🔍 Quét ảnh trong link", type="secondary", disabled=not links_text):
-        prog = st.progress(0.0, text="Đang quét...")
-        from omr_gdrive import scan_links
-        pages, report = scan_links(links_text, prog)
-        prog.empty()
-        st.session_state["scan_pages"] = [str(p) for p in pages]
-        st.dataframe(report, width="stretch", hide_index=True)
-        st.success(f"Đã quét tổng cộng {len(pages)} ảnh.")
-        st.dataframe([{"file": p.name, "thư mục": Path(p).parent.name} for p in pages],
-                     width="stretch", hide_index=True)
-    scanned = st.session_state.get("scan_pages") or []
-    if scanned:
-        with st.expander("⓪ Chuẩn hoá ảnh đã quét về đúng mẫu giấy (khuyến nghị)"):
-            st.caption("Đưa từng ảnh về đúng khung mẫu: tự xoay 4 hướng, khử nghiêng/"
-                       "phối cảnh, chuẩn hoá sáng. Ảnh không khớp mẫu sẽ bị báo.")
-            d_paper = st.selectbox("Mẫu giấy:", ["12", "10_11"], key="gd_paper",
-                                   format_func=lambda k: TPL_CHOICES[k][0]
-                                   if k in TPL_CHOICES else k)
-            d_tpl = TPL_CHOICES.get(d_paper, (None, "", ""))[1]
-            d_key = st.text_input("File đáp án:", value=TPL_CHOICES.get(d_paper, ("", "", ""))[2],
-                                  key="gd_key")
-            if st.button("🖼️ Chuẩn hoá ảnh đã quét", key="gd_norm_run",
-                         disabled=not (Path(d_tpl).is_file() and Path(d_key).is_file())):
-                stamp_g = datetime.now().strftime("%Y%m%d_%H%M%S")
-                pr = st.progress(0.0, text="Đang chuẩn hoá...")
-                ok_paths, rep, _ink, _ex = normalize_batch(
-                    [Path(x) for x in scanned], d_tpl, d_paper, d_key,
-                    OUTDIR / "chuan_hoa" / f"gdrive_{stamp_g}", pr)
-                pr.empty()
-                st.session_state["scan_pages_norm"] = [str(x) for x in ok_paths]
-                st.dataframe(rep, width="stretch", hide_index=True)
-                st.success(f"Chuẩn hoá {len(ok_paths)}/{len(scanned)} ảnh.")
-                if ok_paths:
-                    import zipfile
-                    buf = io.BytesIO()
-                    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                        for pth in ok_paths:
-                            z.write(pth, Path(pth).name)
-                    st.download_button("⬇️ Tải ZIP ảnh đã chuẩn hoá", data=buf.getvalue(),
-                                       file_name=f"chuan_hoa_{stamp_g}.zip", key="gd_zip")
-                    st.image(str(ok_paths[0]), caption="Ảnh đã chuẩn hoá (đúng mẫu)",
-                             width="stretch")
-        if st.session_state.get("scan_pages_norm"):
-            st.info(f"Đang có {len(st.session_state['scan_pages_norm'])} ảnh ĐÃ chuẩn hoá — "
-                    "nút chấm bên dưới sẽ dùng các ảnh này.")
-    reg2 = load_registry()
-    key_data2 = load_keys_multi(st.session_state.get("key_ids"), reg2)
-    scanned_use = st.session_state.get("scan_pages_norm") or scanned
-    if scanned_use and st.button("▶️ Chấm tất cả ảnh đã quét", type="primary"):
-        prog = st.progress(0.0, text="Chuẩn bị...")
-        res = grade_batch([(Path(p), None, None) for p in scanned_use], prog,
-                          key_data=key_data2)
-        prog.empty()
-        st.dataframe(results_table(res), width="stretch", hide_index=True)
-        st.download_button("⬇️ Tải Excel", data=to_excel(results_table(res)),
-                           file_name="KQ_cham_scan.xlsx")
-        save_run_db(f"web-scan ({len(res)} trang)", res)
-
 # ---------------- TAB 4: CSDL ----------------
 with tab_db:
     from omr_db import list_runs, show_run
