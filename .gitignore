@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Tools & agent internal cache
+.tools/
+.agents/
+
+# Output generated files (preserve output directory)
+output/*
+!output/.gitkeep
+
+# Logs and databases journals
+*.log
+*.db-journal
+*.db-wal
+
+# OS files
+.DS_Store
+Thumbs.db
