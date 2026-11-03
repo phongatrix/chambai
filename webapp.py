@@ -14,6 +14,30 @@ import omr_templates
 
 st.set_page_config(page_title="Chấm trắc nghiệm AI", page_icon="📝", layout="wide")
 
+st.html("""
+<script>
+function handleChunkError() {
+    const lastReload = sessionStorage.getItem('last_chunk_reload');
+    const now = Date.now();
+    if (!lastReload || now - parseInt(lastReload) > 10000) {
+        sessionStorage.setItem('last_chunk_reload', now.toString());
+        window.location.reload();
+    }
+}
+window.addEventListener('vite:preloadError', handleChunkError);
+window.addEventListener('error', (e) => {
+    if (e && e.message && e.message.includes('dynamically imported module')) {
+        handleChunkError();
+    }
+});
+window.addEventListener('unhandledrejection', (e) => {
+    if (e && e.reason && (e.reason.message || '').includes('dynamically imported module')) {
+        handleChunkError();
+    }
+});
+</script>
+""", unsafe_allow_javascript=True)
+
 ROOT = Path(__file__).resolve().parent
 OUTDIR = ROOT / "output"
 OUTDIR.mkdir(exist_ok=True)
@@ -23,9 +47,7 @@ KEY_DIR.mkdir(parents=True, exist_ok=True)
 REG = KEY_DIR / "registry.json"
 BUILTIN_KEY_FILE = ROOT / "data/keys_builtin.json"
 
-st.title("📝 Hệ thống chấm trắc nghiệm bằng AI (OpenCV)")
-st.caption("49 bài kiểm chứng: 30/49 khớp tuyệt đối với phần mềm cũ, 48/49 lệch ≤ 0.5 điểm; "
-           "mã đề suy từ đáp án 49/49")
+st.title("📝 Hệ thống chấm trắc nghiệm bằng AI")
 
 
 @st.cache_data
@@ -273,7 +295,7 @@ def save_run_db(source, results):
 
 
 tab_tpl, tab_sheet, tab_key, tab_db = st.tabs(
-    ["🎯 Mẫu giấy & lưới đáp án", "🟩 Chấm theo mẫu (fiducial)",
+    ["🎯 Mẫu giấy & lưới đáp án", "🟩 Chấm theo mẫu",
      "📋 Đáp án & QR", "🗄️ Lịch sử CSDL"])
 
 # ---------------- TAB 0: MẪU GIẤY & LƯỚI ĐÁP ÁN ----------------
@@ -321,12 +343,10 @@ with tab_sheet:
     st.caption("🟢 đúng · 🔴 sai · 🟡 trống hoặc tô nhiều đáp án")
 
     TPL_CHOICES = {
-        "12": ("Mẫu THPT 12.png (40 câu ABCD + 8 Đ/S)",
-               str(ROOT / "data/maugiay/12.png") if (ROOT / "data/maugiay/12.png").is_file() else "/home/dell/Documents/tulieuchambai/maugiay/12.png",
-               str(ROOT / "data/dapan/k12dapan.xlsx") if (ROOT / "data/dapan/k12dapan.xlsx").is_file() else "/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
-        "10_11": ("Mẫu QM 10_11.png (30 câu ABCD + 10 Đ/S)",
-                  str(ROOT / "data/maugiay/10_11.png") if (ROOT / "data/maugiay/10_11.png").is_file() else "/home/dell/Documents/tulieuchambai/maugiay/10_11.png",
-                  str(ROOT / "data/dapan/k11dapan.xlsx") if (ROOT / "data/dapan/k11dapan.xlsx").is_file() else "/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
+        "12": ("Mẫu THPT 12.png (40 câu ABCD + 8 Đ/S)", "/home/dell/Documents/tulieuchambai/maugiay/12.png",
+               "/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
+        "10_11": ("Mẫu QM 10_11.png (30 câu ABCD + 10 Đ/S)", "/home/dell/Documents/tulieuchambai/maugiay/10_11.png",
+                  "/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
     }
     c_paper, c_keyf = st.columns([1, 2])
     with c_paper:
@@ -728,9 +748,10 @@ with tab_key:
     if sel_ids:
         qr_id = sel_ids[0]
         qr_png = omr_key.make_qr_png(omr_key.QRCODE_PREFIX + qr_id)
-        g1, g2 = st.columns(2)
-        g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
-        g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
+        if qr_png:
+            g1, g2 = st.columns(2)
+            g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
+            g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
     qr_up = st.file_uploader("Upload/scan hình mã QR (thêm key vào bộ nạp)",
                              type=["png", "jpg", "jpeg"], key="qr_up")
     if qr_up and st.button("🔍 Đọc QR", key="qr_read"):

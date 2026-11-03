@@ -36,12 +36,12 @@ from omr_key import detect_key_format
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_TPLS = {
-    "12": (ROOT / "data/maugiay/12.png") if (ROOT / "data/maugiay/12.png").is_file() else Path("/home/dell/Documents/tulieuchambai/maugiay/12.png"),
-    "10_11": (ROOT / "data/maugiay/10_11.png") if (ROOT / "data/maugiay/10_11.png").is_file() else Path("/home/dell/Documents/tulieuchambai/maugiay/10_11.png"),
+    "12": Path("/home/dell/Documents/tulieuchambai/maugiay/12.png"),
+    "10_11": Path("/home/dell/Documents/tulieuchambai/maugiay/10_11.png"),
 }
 DEFAULT_KEYS = {
-    "12": (ROOT / "data/dapan/k12dapan.xlsx") if (ROOT / "data/dapan/k12dapan.xlsx").is_file() else Path("/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
-    "10_11": (ROOT / "data/dapan/k11dapan.xlsx") if (ROOT / "data/dapan/k11dapan.xlsx").is_file() else Path("/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
+    "12": Path("/home/dell/Documents/tulieuchambai/dapan/k12dapan.xlsx"),
+    "10_11": Path("/home/dell/Documents/tulieuchambai/dapan/k11dapan.xlsx"),
 }
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 STATE_VI = {"ok": "đúng", "wrong": "sai", "blank": "trống", "multi": "tô nhiều"}
