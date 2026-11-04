@@ -776,7 +776,15 @@ with tab_key:
     ev = st.dataframe(df_rows, width="stretch", hide_index=True,
                       on_select="rerun", selection_mode="multi-row",
                       key="key_tbl")
-    sel = list(ev.selection.rows)
+    sel = []
+    if hasattr(ev, "selection") and hasattr(ev.selection, "rows"):
+        sel = list(ev.selection.rows)
+    elif isinstance(ev, dict) and "selection" in ev:
+        sel_data = ev["selection"]
+        if isinstance(sel_data, dict):
+            sel = list(sel_data.get("rows", []))
+        elif hasattr(sel_data, "rows"):
+            sel = list(sel_data.rows)
     if sel:
         st.session_state["key_ids"] = [kids[i] for i in sel]
     else:
@@ -801,9 +809,10 @@ with tab_key:
     if key_ids:
         qr_id = key_ids[0]
         qr_png = omr_key.make_qr_png(omr_key.QRCODE_PREFIX + qr_id)
-        g1, g2 = st.columns(2)
-        g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
-        g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
+        if qr_png:
+            g1, g2 = st.columns(2)
+            g1.image(qr_png, caption=f"QR chọn bộ {qr_id}", width=180)
+            g2.download_button("⬇️ Tải QR", data=qr_png, file_name=f"qr_key_{qr_id}.png")
     qr_up = st.file_uploader("Upload/scan hình mã QR (thêm key vào bộ nạp)",
                              type=["png", "jpg", "jpeg"], key="qr_up")
     if qr_up and st.button("🔍 Đọc QR", key="qr_read"):

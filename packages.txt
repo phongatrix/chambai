@@ -1,2 +1,4 @@
-# System packages for Streamlit Community Cloud (apt) — cài tự động khi deploy
 poppler-utils
+libgl1
+libglib2.0-0
+tesseract-ocr
