@@ -856,11 +856,21 @@ if nav == LBL_SHEET:
             ex = res_p.get("extras") or []
             ex_i = ex[i - 1] if (i - 1) < len(ex) else {}
             if not path_ok[i - 1]:
+                # LÝ DO CHUẨN HOÁ THẬT từ bảng ⓪ (match theo tên file gốc)
+                _prep_reason = ""
+                try:
+                    for _pr in (res_p.get("rows") or []):
+                        if _pr.get("file") == disp:
+                            _prep_reason = str(_pr.get("ghi chú") or "")
+                            break
+                except Exception:                            # noqa
+                    pass
                 rows_out.append({"file": disp, "chuẩn hoá": "✗", "SBD": "-",
                                  "mã đề": "-", "nguồn": "-", "khớp mẫu": 0.0,
                                  "P1": "-", "P2": "-", "tổng": 0, "sai": 0,
                                  "trống/nhiều": 0,
-                                 "ghi chú": "bước ⓪ không chuẩn hoá được — xem bảng ⓪"})
+                                 "ghi chú": (_prep_reason or
+                                             "bước ⓪ không chuẩn hoá được")})
                 row_meta.append({"img": None, "sbd": None, "made": None, "file": disp})
                 continue
             try:
@@ -991,10 +1001,19 @@ if nav == LBL_SHEET:
                     "mã đề": _r.get("mã đề", "-"),
                     "lý do không chấm được":
                         (_r.get("ghi chú") or "không xác định")})
-        st.success(f"Đã chấm {len(_graded_rows)}/{len(rows_out)} ảnh — "
-                   f"lưu tại {res['outd']}")
+        # tách nhỏ: KHÔNG chuẩn hoá được (bỏ qua khi chấm) vs lỗi khi chấm
+        _failed_norm = [f_ for f_ in _failed_rows
+                        if "chuẩn hoá" in f_["lý do không chấm được"].lower()
+                        or "khớp mẫu" in f_["lý do không chấm được"].lower()
+                        or "trắng" in f_["lý do không chấm được"].lower()
+                        or "bám sát" in f_["lý do không chấm được"].lower()]
+        _failed_other = [f_ for f_ in _failed_rows if f_ not in _failed_norm]
+        st.success(f"Đã chấm {len(_graded_rows)} ảnh (bỏ qua "
+                   f"{len(_failed_norm)} ảnh không chuẩn hoá được"
+                   + (f", {len(_failed_other)} ảnh lỗi khác"
+                      if _failed_other else "") + f") — lưu tại {res['outd']}")
         if _failed_rows:
-            st.warning(f"⚠️ KHÔNG chấm được {len(_failed_rows)} ảnh — "
+            st.warning(f"⚠️ Có {len(_failed_rows)} ảnh không chấm được — "
                        "danh sách riêng bên dưới.")
         st.caption("👉 Bấm vào một dòng để xem ảnh kết quả bên dưới. "
                    "Màu trên ảnh: **xanh = đúng**, **đỏ = sai**, **vàng = trống/tô nhiều**, "
@@ -1011,9 +1030,16 @@ if nav == LBL_SHEET:
         if _failed_rows:
             with st.expander(f"⛔ Danh sách {len(_failed_rows)} ảnh KHÔNG chấm "
                              "được (bấm để xem)", expanded=bool(_failed_rows)):
-                st.dataframe(_df_str(_failed_rows), width="stretch",
-                             hide_index=True,
-                             key="sheet_failed_table")
+                if _failed_norm:
+                    st.markdown(f"**❌ Không chuẩn hoá được — đã bỏ qua khi chấm "
+                                f"({len(_failed_norm)} ảnh):**")
+                    st.dataframe(_df_str(_failed_norm), width="stretch",
+                                 hide_index=True, key="sheet_failed_table")
+                if _failed_other:
+                    st.markdown(f"**⚠️ Lỗi khác trong lúc chấm "
+                                f"({len(_failed_other)} ảnh):**")
+                    st.dataframe(_df_str(_failed_other), width="stretch",
+                                 hide_index=True, key="sheet_failed_other")
                 st.download_button(
                     "⬇️ Tải danh sách ảnh không chấm được (CSV)",
                     data="\n".join(["file,SBD,mã đề,lý do"] +
