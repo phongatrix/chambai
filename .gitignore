@@ -27,3 +27,4 @@ data/gdrive_in/
 
 # Models lớn (>100MB vượt giới hạn GitHub)
 *.onnx
+data/gemini_key.txt

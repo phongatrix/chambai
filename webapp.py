@@ -570,6 +570,21 @@ if nav == LBL_SHEET:
                                    file_name=f"luoi_dap_an_{paper}_{de0}.json")
                 fixed_made = st.text_input(
                     "Mã đề (bỏ trống = tự chọn)", value="", key="sheet_made")
+                import os as _os
+                # key mặc định: biến môi trường > data/gemini_key.txt
+                _kfile = ROOT / "data" / "gemini_key.txt"
+                _saved = _kfile.read_text(encoding="utf-8").strip() \
+                    if _kfile.is_file() else ""
+                _env_key = _os.environ.get("GEMINI_API_KEY", "") or _saved
+                st.text_input(
+                    "🔑 Gemini API key — nhận dạng CHỮ VIẾT TAY (SBD + STT)",
+                    value=_env_key, type="password", key="gemini_key",
+                    help="MẶC ĐỊNH đã cấu hình sẵn. Muốn đổi: lấy key miễn phí "
+                         "tại aistudio.google.com/apikey (đăng nhập Google → "
+                         "Get API key → copy) rồi dán vào đây — hoặc đặt biến "
+                         "môi trường GEMINI_API_KEY. Có key: mỗi bài được đọc "
+                         "SBD + STT viết tay bằng AI Gemini. Không có key: chỉ "
+                         "dùng CNN nội bộ (đọc SBD ô in).")
         except Exception as _e:  # noqa
             st.warning(f"Chưa dựng được lưới: {_e}")
 
@@ -842,6 +857,22 @@ if nav == LBL_SHEET:
                                  "ghi chú": "không khớp mẫu (chụp rõ 4 góc)"})
                 row_meta.append({"img": None, "sbd": None, "made": None, "file": disp})
                 continue
+            # ---- NHẬN DẠNG CHỮ VIẾT TAY (SBD + STT) — omr_hwr ----
+            # Có Gemini key: đọc cả 2 trường bằng AI (cắt dải đầu trang phiếu).
+            # Không key: CNN nội bộ chỉ khi bubble không đọc được SBD.
+            _gem = st.session_state.get("gemini_key") or ""
+            _hwr = {"SBD": None, "STT": None, "engine": "none"}
+            try:
+                import omr_hwr as _HWR
+                _hwr = _HWR.read_fields(r["img"], tpl_path, paper,
+                                        api_key=(_gem or None))
+            except Exception as _e:                          # noqa
+                st.caption(f"⚠ đọc chữ viết tay lỗi: {_e}")
+            if _hwr.get("SBD") and not r.get("sbd"):
+                r["sbd"] = _hwr["SBD"]
+                r["sbd_source"] = ("viết tay (AI)" if _hwr.get("engine") == "gemini"
+                                   else "viết tay")
+            _stt = _hwr.get("STT") or "-"
             # Tên chuẩn: <SBD>_<Mã đề>_<ngày>_<giờ>.jpg
             # tên theo quy định: SBD_Mãđề_NgàyGiờ HIỆN HÀNH (có giây)
             base_name = CTM.output_name_now(r)
@@ -883,7 +914,7 @@ if nav == LBL_SHEET:
             pn = r.get("pre_norm") or {}
             norm_tag = ("↻%d° q%.2f" % (pn.get("rot", 0), pn.get("quality", 0))) if pn else "—"
             rows_out.append({"file": disp, "chuẩn hoá": norm_tag,
-                             "SBD": r.get("sbd") or "-",
+                             "SBD": r.get("sbd") or "-", "STT": _stt,
                              "mã đề": r["made"], "nguồn": r["made_source"],
                              "khớp mẫu": r["quality"],
                              "P1": f"{r['stats']['P1']['ok']}/{r['stats']['P1']['n']}",
@@ -892,7 +923,7 @@ if nav == LBL_SHEET:
                              "ghi chú": ""})
             details.append({"file": disp, "made": r["made"], "detail": r["detail"]})
             row_meta.append({"img": (str(outp) if outp else None),
-                             "sbd": r.get("sbd"),
+                             "sbd": r.get("sbd"), "stt": _stt,
                              "made": r["made"], "file": disp})
         # ---- SẮP THỨ TỰ THEO TÊN FILE ẢNH KẾT QUẢ ----
         # (vd NA_132_20261103_104757.jpg, NA_209_...): Excel + PDF + bảng đều
@@ -991,6 +1022,8 @@ if nav == LBL_SHEET:
             parts = [f"**Mã đề: {meta['made']}**"]
             if paper == "12" and meta.get("sbd"):
                 parts.append(f"**SBD: {meta['sbd']}**")
+            if str(meta.get("stt") or "-") != "-":
+                parts.append(f"**STT: {meta['stt']}**")
             st.markdown(" · ".join(parts))
             st.image(meta["img"], caption=Path(meta["img"]).name, width="stretch")
 
