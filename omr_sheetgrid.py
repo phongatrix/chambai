@@ -72,13 +72,23 @@ _SQ_CACHE = {}
 
 
 def _square_candidates(path, thr=0.80):
-    """Ứng viên ô đen vuông (mọi kích thước) — mask tính 1 lần, cache theo ảnh."""
-    key = (str(path), thr)
-    if key in _SQ_CACHE:
-        return _SQ_CACHE[key]
-    img = path
+    """Ứng viên ô đen vuông (mọi kích thước) — mask tính 1 lần, cache theo ảnh.
+
+    Cache key với MẢNG (ndarray) phải là HASH NỘI DUNG: str(ndarray) bị numpy
+    rút gọn (chỉ còn vài giá trị góc + kích thước) -> hai ảnh khác nhau cùng
+    kích thước (vd các biến thể xoay có viền trắng giống nhau) va CHÙM key và
+    dùng NHẦM ứng viên của ảnh trước — bug thật, ảnh hưởng best_orientation
+    (mỗi hướng xoay sinh 1 mảng cùng cỡ)."""
     if isinstance(path, (str, bytes)) or hasattr(path, "__fspath__"):
         img = cv2.imread(str(path))
+        key = ("f", str(path), thr)
+    else:
+        img = path
+        import hashlib
+        key = ("a", hashlib.md5(np.ascontiguousarray(img).tobytes()).hexdigest(),
+               thr)
+    if key in _SQ_CACHE:
+        return _SQ_CACHE[key]
     if img is None:
         raise FileNotFoundError(path)
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -89,13 +99,22 @@ def _square_candidates(path, thr=0.80):
     cs, _ = cv2.findContours(dark, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     out = []
     for c in cs:
-        x, y, w, h = cv2.boundingRect(c)
         a = cv2.contourArea(c)
         if a < 20:
             continue
-        fill = a / (w * h + 1e-9)
-        if fill > 0.75 and 0.70 <= w / h <= 1.40:
-            out.append((x + w / 2.0, y + h / 2.0, float(w), float(h)))
+        # minAreaRect: KHÍT với ô xoay BẤT KỲ góc nào (bounding box thẳng trục
+        # làm fill = 1/(cosθ+sinθ)² — ô xoay >~9° rơi dưới 0.75 và biến mất,
+        # đúng nguyên nhân phiếu nghiêng không còn mốc)
+        (rcx, rcy), (rw, rh), _ang = cv2.minAreaRect(c)
+        if rw < 2 or rh < 2:
+            continue
+        fill = a / (rw * rh + 1e-9)
+        lo_s, hi_s = min(rw, rh), max(rw, rh)
+        # 0.85: ô VUÔNG xoay bất kỳ fill ≈ 0.95+; hình TRÒN fill = π/4 ≈ 0.785
+        # (bubble in đậm phải bị LOẠI — nếu không hàng trăm bubble thành ứng
+        # viên và RANSAC nổ thời gian)
+        if fill > 0.85 and 0.70 <= lo_s / hi_s <= 1.40:
+            out.append((rcx, rcy, float(lo_s), float(hi_s)))
     _SQ_CACHE[key] = out
     return out
 
@@ -230,6 +249,110 @@ def grid_summary(grid):
 
 # ---------- 3. CĂN KHỚP ẢNH VỚI MẪU ----------
 
+def _match_fiducials(tsq, psq, approx):
+    """Ghép ô mẫu <-> ô ảnh bằng RANSAC trên CẶP ĐIỂM — BẤT BIẾN XOAY.
+
+    _quad4 chọn 4 đỉnh cực trị theo quy ước "ảnh gần thẳng": phiếu nghiêng
+    5-30° làm cực trị rơi vào phần tử SAI (hộp mã đề, ô cạnh mép) -> H khớp
+    nhầm 2/4 góc (q vẫn ~1.0 vì phiếu tự-similar). Hàm này thay vậy:
+
+    với mỗi cặp ô mẫu (i,j) × cặp ô ảnh (k,l) có khoảng cách tương thích
+    (thang trong [0.4, 2.5] × approx), biến đổi similarity i→k, j→l rồi dự
+    đoán vị trí toàn bộ ô mẫu; ô ảnh gần nhất trong bán chịu tol tính 1 inlier
+    (mỗi ô ảnh dùng 1 lần). Giả thuyết nhiều inlier nhất (≥4) thắng; trả
+    (src 4 điểm mẫu, dst 4 điểm ảnh) trải rộng nhất để fit homography."""
+    T = np.float32([[m[0], m[1]] for m in tsq])
+    Pp = np.float32([[m[0], m[1]] for m in psq])
+    n, m_ = len(T), len(Pp)
+    if n < 4 or m_ < 4:
+        return None
+    DT = np.linalg.norm(T[:, None, :] - T[None, :, :], axis=-1)
+    DP = np.linalg.norm(Pp[:, None, :] - Pp[None, :, :], axis=-1)
+    # chỉ dùng cặp mốc GỐC DÀI (dt ≥ 40% cặp xa nhất): baseline ngắn cho nhiều
+    # giả thuyết sai mà ít thông tin — chặt chẽ hơn và nhanh hơn nhiều lần
+    dt_min = 0.40 * float(DT.max())
+    med_px = float(np.median([p_[2] for p_ in psq]))   # cỡ mốc trên ảnh
+    tol_tight = max(8.0, 0.40 * med_px)                # ngưỡng KHÍT theo mốc
+    hyps = []                     # (số inlier lỏng, keep, nearest)
+    for i in range(n):
+        for j in range(i + 1, n):
+            dt = float(DT[i, j])
+            if dt < dt_min:
+                continue
+            lo_d, hi_d = 0.4 * approx * dt, 2.5 * approx * dt
+            kp, lp = np.where((DP >= lo_d) & (DP <= hi_d))
+            kp, lp = kp[kp < lp], lp[kp < lp]
+            for k, l in zip(kp.tolist(), lp.tolist()):
+                vT, vP = T[j] - T[i], Pp[l] - Pp[k]
+                nT = float(np.linalg.norm(vT))
+                sp = float(np.linalg.norm(vP)) / max(1e-9, nT)
+                cos = float(vT @ vP) / max(1e-9, nT * np.linalg.norm(vP))
+                sin = float(vT[0] * vP[1] - vT[1] * vP[0]) / max(1e-9, nT * np.linalg.norm(vP))
+                Rm = np.array([[cos, -sin], [sin, cos]], np.float32)
+                pred = (T - T[i]) @ Rm.T * sp + Pp[k]
+                # tol LỎNG theo baseline (phối cảnh lệch xa góc tới % kích thước)
+                tol = max(14.0, 0.025 * dt * sp)
+                # dd dạng (số ô ảnh, số ô mẫu): khoảng cách mỗi ô ảnh -> mỗi ô mẫu
+                dd = np.linalg.norm(Pp[:, None, :] - pred[None, :, :], axis=-1)
+                nearest = dd.argmin(axis=0)          # (n,) ô ảnh gần nhất mỗi ô mẫu
+                okm = dd[nearest, np.arange(n)] < tol
+                if okm.sum() < 4:
+                    continue
+                seen, keep = set(), []
+                for idx in range(n):
+                    if okm[idx] and int(nearest[idx]) not in seen:
+                        seen.add(int(nearest[idx]))
+                        keep.append(idx)
+                hyps.append((len(keep), keep, nearest))
+                if len(keep) >= n:
+                    break
+            if any(h[0] >= n for h in hyps):
+                break
+        if any(h[0] >= n for h in hyps):
+            break
+    if not hyps:
+        return None
+    # ---- STAGE 2: chấm lại bằng HOMOGRAPHY + ngưỡng KHÍT ----
+    # similarity chỉ xấp xỉ phối cảnh (lệch tới vài % cỡ ảnh ở góc xa) nên
+    # tol lỏng bắt thêm giả thuyết SAI; fit H thật từ inlier rồi đếm lại inlier
+    # với ngưỡng khít theo cỡ mốc — giả thuyết đúng sẽ bứt lên tuyệt đối.
+    hyps.sort(key=lambda h: -h[0])
+    best_tight, best_pick = 3, None
+    for _lo_n, keep, nearest in hyps[:6]:
+        if len(keep) < 4:
+            continue
+        src4 = np.float32([T[p] for p in keep])
+        dst4 = np.float32([Pp[int(nearest[p])] for p in keep])
+        Hm, _ = cv2.findHomography(src4, dst4, 0)
+        if Hm is None:
+            continue
+        proj = cv2.perspectiveTransform(T.reshape(-1, 1, 2), Hm).reshape(-1, 2)
+        dd = np.linalg.norm(Pp[:, None, :] - proj[None, :, :], axis=-1)
+        near2 = dd.argmin(axis=0)
+        okm = dd[near2, np.arange(n)] < tol_tight
+        seen, keep2 = set(), []
+        for idx in range(n):
+            if okm[idx] and int(near2[idx]) not in seen:
+                seen.add(int(near2[idx]))
+                keep2.append(idx)
+        if len(keep2) > best_tight:
+            best_tight, best_pick = len(keep2), (keep2, near2)
+    if best_pick is None:
+        return None
+    keep, nearest = best_pick
+    if len(keep) > 4:                   # lấy 4 inlier trải rộng nhất (cực trị)
+        sub = T[keep]
+        s = sub[:, 0] + sub[:, 1]
+        d = sub[:, 0] - sub[:, 1]
+        pick = [keep[int(np.argmin(s))], keep[int(np.argmax(d))],
+                keep[int(np.argmax(s))], keep[int(np.argmin(d))]]
+    else:
+        pick = keep
+    src = np.float32([T[p] for p in pick])
+    dst = np.float32([Pp[int(nearest[p])] for p in pick])
+    return src, dst
+
+
 def _quad4(ms):
     """Chọn 4 đỉnh cực trị rồi sắp theo cùng một quy ước (bắt đầu TL, thuận chiều).
 
@@ -275,6 +398,51 @@ def _blob_centers(photo):
         a = cv2.contourArea(c)
         if 40 <= a <= 8000 and 6 <= w <= 120 and 6 <= h <= 120 and 0.5 <= w / h <= 2.0:
             out.append((x + w / 2.0, y + h / 2.0))
+    return np.float32(out) if out else np.zeros((0, 2), np.float32)
+
+
+def _ring_centers(photo):
+    """Tâm các VÒNG TRÒN IN (ring có đúng 1 lỗ con) — CHẶT hơn _blob_centers.
+
+    _blob_centers nhận MỌI blob 6-120px (chữ số, khung, nét chữ) nên đếm
+    'khớp lưới' quá dễ — phiếu in KHÁC layout vẫn đạt hit 1.0. Ring phải là
+    contour ngoài có đúng 1 lỗ con, kích thước/hình dạng hợp lý."""
+    g = cv2.cvtColor(photo, cv2.COLOR_BGR2GRAY)
+    # KHÔNG GaussianBlur ở đây: ring photocopy NHẠT (nét 1-2 px, xám 100-200)
+    # bị blur làm tan trước adaptiveThreshold — mất ~90 % ring (đo: 545 → 36);
+    # adaptiveThreshold (blockSize 41) vốn đã chống nhiễu đủ tốt
+    bw = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY_INV, 41, 10)
+    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    cs, hz = cv2.findContours(bw, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    if hz is None:
+        return np.zeros((0, 2), np.float32)
+    for i, c in enumerate(cs):
+        if hz[0][i][3] != -1:            # chỉ contour NGOÀI
+            continue
+        (cx, cy), (rw, rh), _ = cv2.minAreaRect(c)
+        lo_s, hi_s = min(rw, rh), max(rw, rh)
+        if not (6 <= hi_s <= 60 and 0.55 <= lo_s / hi_s <= 1.45):
+            continue
+        kids = sum(1 for q in hz[0] if q[3] == i)
+        if kids in (1, 2):
+            # ring chuẩn (1 lỗ) hoặc ring CÓ DẤU CHẤM bên trong (2 con) —
+            # bubble đã tô vẫn là mốc bám mẫu hợp lệ
+            out.append((cx, cy))
+            continue
+        if kids == 0 and hi_s <= 22:
+            # ring MẤT LỖ/ĐỨT NÉT do photocopy nhạt (contour thành vòng cung hở,
+            # erode làm rỗng lõi nên không dùng erode): quyết bằng ĐỘ SÁNG TÂM —
+            # ring: tâm = GIẤY SÁNG > vành mực; chấm đặc/ký tự: tâm TỐI
+            ix, iy = int(round(cx)), int(round(cy))
+            if not (0 <= ix < g.shape[1] and 0 <= iy < g.shape[0]):
+                continue
+            core_val = float(g[iy, ix])
+            band_val = float(g[np.clip(c[:, 0, 1], 0, g.shape[0] - 1),
+                               np.clip(c[:, 0, 0], 0, g.shape[1] - 1)].mean())
+            if core_val - band_val > 25:
+                out.append((cx, cy))
     return np.float32(out) if out else np.zeros((0, 2), np.float32)
 
 
@@ -394,25 +562,53 @@ def align_photo(photo_path, template_png, cells, photo=None, ref_cells=None,
     if len(blobs) < 20:
         return None, ph, 0.0
     # tìm dải kích thước mốc trong ảnh cho khớp mẫu (thang ảnh/mẫu ~ W_ảnh/W_mẫu)
+    # Dải bắt đầu 18 px (trước đây 30): hỗ trợ ảnh chụp XA hơn — template 461 px
+    # có mốc 8-9 px nên ảnh ~2-3.3× (mốc 18-30 px) trước đây không thể căn.
+    # Các ô lớn (hộp mã đề 250 px+) vẫn bị chặn bởi hi = lo*2.2 và _quad4.
     tw = cv2.imread(str(template_png)).shape[1]
     approx = ph.shape[1] / max(1, tw)          # ~7-8x
     best = None
-    for lo in range(30, 110, 8):
+    # ---- GHÉP MỐC RANSAC CẶP ĐIỂM (bất biến xoay/nghiêng) ----
+    # quét dải kích thước theo THỨ TỰ GẦN CỠ MỐC KỲ VỌNG nhất (mốc mẫu ~8-9 px
+    # × thang approx): dải đúng thường thành công ngay, khỏi quét hết 12 dải.
+    exp_px = 9.0 * approx
+    los = sorted(range(18, 110, 8),
+                 key=lambda lo_: abs((lo_ + lo_ * 2.2) / 2.0 - exp_px))
+    for lo in los:
         hi = int(lo * 2.2)
         psq = _fiducial_squares(ph, side=(lo, hi))
         if len(psq) < 4:
             continue
-        dst = _quad4(psq)
-        # lọc theo tỉ lệ thang hợp lý
-        scale = np.linalg.norm(dst[1] - dst[0]) / max(1e-6, np.linalg.norm(src[1] - src[0]))
-        if not (0.35 * approx <= scale <= 3.0 * approx):
+        mt = _match_fiducials(tsq, psq, approx)
+        if mt is None:
             continue
-        H = cv2.getPerspectiveTransform(src, dst)
+        src_m, dst_m = mt
+        H = cv2.getPerspectiveTransform(src_m, dst_m)
         if not _h_valid(H, cells, ph.shape, ref_cells):
             continue
         q = _quality(H, cells, blobs)
         if best is None or q > best[0]:
             best = (q, H)
+        if q >= 0.90:                    # đủ tốt — không quét thêm dải
+            break
+    if best is None:
+        # dự phòng: quy ước cực trị cũ (ảnh gần thẳng) theo từng dải size
+        for lo in range(18, 110, 8):
+            hi = int(lo * 2.2)
+            psq = _fiducial_squares(ph, side=(lo, hi))
+            if len(psq) < 4:
+                continue
+            dst = _quad4(psq)
+            # lọc theo tỉ lệ thang hợp lý
+            scale = np.linalg.norm(dst[1] - dst[0]) / max(1e-6, np.linalg.norm(src[1] - src[0]))
+            if not (0.35 * approx <= scale <= 3.0 * approx):
+                continue
+            H = cv2.getPerspectiveTransform(src, dst)
+            if not _h_valid(H, cells, ph.shape, ref_cells):
+                continue
+            q = _quality(H, cells, blobs)
+            if best is None or q > best[0]:
+                best = (q, H)
     if best is None:
         if not allow_sift:
             return None, ph, 0.0

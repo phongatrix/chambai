@@ -31,6 +31,12 @@ MARKER_MAX_FRAC = 0.004  # diện tích tối đa của 1 mốc (tỉ lệ ảnh
 MIN_MARKERS = 4
 MAX_MATCH_DIST = 0.13    # dung sai khớp theo toạ độ chuẩn hoá
 MIN_VERIFY = 0.70        # tỉ lệ mốc phải khớp sau khi warp
+MIN_ALIGN = 0.45         # sàn quality để ĐƯA ảnh tới bước kiểm chứng corner/lưới.
+                         # Ảnh chụp gần/mốc mờ (bộ Test11) chỉ align được quality
+                         # 0,5-0,7 — Gate 0,70 loại chúng TRƯỚC khi tới kiểm chứng
+                         # 4 mốc góc / lưới ô, trong khi cách chuẩn hoá trước vẫn
+                         # chấp nhận (corner-check trong best_orientation đã chạy).
+                         # Dưới 0,45: homography quá yếu, bỏ luôn.
 
 
 # ---------- 1. đọc ảnh ----------
@@ -364,6 +370,70 @@ def refine_grid_by_cells(warped, cells, scale, iters=4, tol_frac=0.55):
     return Hc, matched / max(1, len(pts))
 
 
+RING_MIN_PART = {
+    # cổng BÁM MẪU — xác thực ảnh có bám sát MẪU GIẤY ĐÃ CHỌN hay không.
+    # "ALL" = tỉ lệ khớp trên TOÀN BỘ ô của template (build_template_cells):
+    #   mẫu 12:  đúng mẫu nét 90-97%, đúng mẫu photocopy nhạt 67-82%,
+    #            phiếu in BIẾN THỂ (P1 nửa chiều dài) 50-51%,
+    #            chấm nhầm SAI mẫu 16-17%  -> ngưỡng 0.60 tách sạch
+    # "P1"/"P2"/... = theo phần trên keyed cells (mẫu 10_11 photocopy mờ:
+    #   ring detector bị dấu chấm của HS + mực nhạt hạn chế — đo đúng mẫu
+    #   P1 0.65-0.71, P2 0.56-0.81 -> ngưỡng thấp tương ứng)
+    "12": {"ALL": 0.60},
+    "10_11": {"P1": 0.40, "P2": 0.15, "P3": 0.15},
+}
+RING_MIN_DEFAULT = 0.50
+
+
+def ring_part_rates(warped, cells, scale):
+    """Tỉ lệ ô có VÒNG TRÒN IN đúng vị trí, TÍNH RIÊNG THEO PHẦN (P1/P2/P3).
+
+    Đếm ring thật (_ring_centers — loại chữ số/khung); mỗi phần phải bám mẫu
+    độc lập nên phiếu thiếu cả nửa template (in biến thể) không thể lọt."""
+    import omr_sheetgrid as S
+    rings = S._ring_centers(warped)
+    if len(rings) < 10:
+        return {}
+    ys = sorted({round(c[4], 2) for c in cells})
+    dy = float(np.median(np.diff(ys))) * scale if len(ys) > 2 else 22.0
+    tol = 0.45 * dy
+    acc = {}
+    for c in cells:
+        d = np.linalg.norm(rings - np.float32([c[3] * scale, c[4] * scale]),
+                           axis=1)
+        a = acc.setdefault(c[0], [0, 0])
+        a[1] += 1
+        if len(d) and float(d.min()) <= tol:
+            a[0] += 1
+    return {k: v[0] / max(1, v[1]) for k, v in acc.items()}
+
+
+def ring_grid_stats(warped, cells, scale):
+    """Thống kê bám mẫu: tỉ lệ ô mẫu có VÒNG TRÒN IN đúng vị trí (sau warp) +
+    residual trung vị (px).
+
+    Khác refine_grid_by_cells (hit đếm MỌI blob gần — chữ số/khung cũng tính,
+    phiếu khác layout vẫn đạt 1.0), hàm này chỉ đếm RING thật qua
+    omr_sheetgrid._ring_centers — đo CHÍNH XÁC mức bám sát mẫu giấy."""
+    import omr_sheetgrid as S
+    pts = np.float32([[c[3] * scale, c[4] * scale] for c in cells])
+    if not len(pts):
+        return 0.0, 99.0
+    ys = sorted({round(c[4], 2) for c in cells})
+    dy = float(np.median(np.diff(ys))) * scale if len(ys) > 2 else 22.0
+    tol = 0.45 * dy
+    rings = S._ring_centers(warped)
+    if len(rings) < 10:
+        return 0.0, 99.0
+    dd = np.linalg.norm(pts[:, None, :] - rings[None, :, :], axis=2)
+    j = dd.argmin(axis=1)
+    near = dd[np.arange(len(pts)), j]
+    ok = near <= tol
+    rate = float(ok.sum()) / float(len(pts))
+    res = float(np.median(near[ok])) if ok.any() else 99.0
+    return rate, res
+
+
 def normalize_light(bgr):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     bg = cv2.blur(gray, (51, 51))
@@ -542,11 +612,60 @@ def best_orientation(img, tpl_path, paper, rotations=(0, 90, 180, 270), cells=No
         # không cần _corner_check quyết định việc dừng.
         if q >= 0.97:
             break
-    # Thử lại có SIFT nếu quét nhanh không tìm được gì tốt (ảnh khó)
-    if (best_ok is None and best[2] < 0.70) and not allow_sift:
+    # Thử lại có SIFT nếu quét nhanh không tìm được gì tốt (ảnh khó) — BỎ QUA
+    # với ảnh gần như TRẮNG (mực < 1.5 %): không có mốc/vòng nào để khớp,
+    # SIFT tốn 4-5 s mà chắc chắn vô ích (ảnh chụp sại/trắng giấy).
+    if (best_ok is None and best[2] < 0.70) and not allow_sift \
+            and _ink_fraction(img) >= 0.015:
         return best_orientation(img, tpl_path, paper, rotations=rotations,
                                 cells=cells, allow_sift=True)
     return best_ok if best_ok is not None else best
+
+
+def _fine_rotation_search(tpl_path, ref, cells, H0, im0, rot0):
+    """XOAY TỈNH (mọi góc): phiếu nghiêng 5-30° làm VIỆC ĐỐI THỨ TỰ 4 ô đen
+    sai (q vẫn ~1.0 vì phiếu tự-similar) -> corner chỉ 2/4 dù H hình học hợp lệ.
+
+    Thử quay ảnh quanh hướng tốt nhất, góc TO -> NHỎ (-6..-24/+6..+24°); với
+    mỗi góc căn lại mẫu và xác thực như normalize: 4/4 mốc đúng HOẶC lưới ô
+    đáp án khớp >= 50 % (bubble TRÙNG lưới mẫu). Trả (H, im, q, dphi, rot)
+    của ứng viên đạt ĐẦU TIÊN, hoặc None."""
+    import omr_sheetgrid as S
+    tpl = cv2.imread(str(tpl_path))
+    if tpl is None:
+        return None
+    use_cells = cells if cells else ref
+    for dphi in (-6, 6, -12, 12, -18, 18, -24, 24):
+        Mr = cv2.getRotationMatrix2D((im0.shape[1] / 2, im0.shape[0] / 2),
+                                     dphi, 1.0)
+        imr = cv2.warpAffine(im0, Mr, (im0.shape[1], im0.shape[0]),
+                             flags=cv2.INTER_LINEAR, borderValue=(255,) * 3)
+        try:
+            Hr, _p, qr = S.align_photo("", tpl_path, use_cells, photo=imr,
+                                       ref_cells=ref, allow_sift=False)
+        except Exception:                                # noqa
+            continue
+        if qr is None or qr < 0.3:
+            continue
+        try:
+            wq = cv2.warpPerspective(
+                imr, np.linalg.inv(np.asarray(Hr, np.float64)),
+                (tpl.shape[1], tpl.shape[0]), flags=cv2.INTER_LINEAR,
+                borderValue=(255,) * 3)
+            quad, _ = template_fiducials(tpl_path)
+            cf = _corner_check(wq, quad, 1.0) if len(quad) == 4 else 0.0
+            ink = _ink_fraction(wq)
+            if not (0.02 <= ink <= 0.50):
+                continue
+            if cf >= 1.0:
+                return Hr, imr, float(qr), dphi, rot0
+            if cells:
+                Hc, hit = refine_grid_by_cells(wq, cells, 1.0)
+                if Hc is not None and hit >= 0.50:
+                    return Hr, imr, float(qr), dphi, rot0
+        except Exception:                                # noqa
+            continue
+    return None
 
 
 def normalize_to_template(photo, tpl_path, scale=2.0, verify=True, paper=None,
@@ -556,17 +675,31 @@ def normalize_to_template(photo, tpl_path, scale=2.0, verify=True, paper=None,
     Quy trình: EXIF → thử 4 hướng xoay → căn mẫu (fiducial + ICP + SIFT dự phòng)
     → warp về kích thước mẫu × scale → chuẩn hoá sáng.
     Trả {"ok", "warped", "H", "quality", "rot", "reason"}.
+
+    CV2 SEED: cv2.findHomography(RANSAC) dùng RNG TOÀN CỤC của OpenCV — nếu
+    không reset, kết quả 1 ảnh phụ thuộc các ảnh đã xử lý trước đó trong cùng
+    tiến trình (server chạy lâu → kết quả "trôi" giữa các lần chấm). Seed cố
+    định trước mỗi ảnh => cùng ảnh luôn cho cùng kết quả.
     """
+    cv2.setRNGSeed(20261104)
     import omr_sheetgrid as S
     img = load_bgr(photo) if (isinstance(photo, (str, bytes))
                               or hasattr(photo, "__fspath__")) else photo
+    # ---- TĂNG NÉT TỰ ĐỘNG cho ảnh MỜ (CLAHE + unsharp — omr_enhance) ----
+    # chỉ kích hoạt khi var Laplacian < 150 (ảnh nét 500-700 đi qua nguyên vẹn)
+    enh_used = False
+    try:
+        import omr_enhance as _ENH
+        img, enh_used = _ENH.enhance_if_blurry(img)
+    except Exception:                                    # noqa
+        enh_used = False
     tpl = cv2.imread(str(tpl_path))
     if tpl is None:
         raise FileNotFoundError(tpl_path)
     paper = paper or paper_of_template(tpl_path)
     Ht, Wt = tpl.shape[:2]
     info = {"ok": False, "warped": None, "H": None, "quality": 0.0, "rot": 0,
-            "reason": ""}
+            "reason": "", "enhanced": enh_used}
     try:
         rots = (0,) if ink_only else (0, 90, 180, 270)
         H, im2, q, rot = best_orientation(img, tpl_path, paper, rotations=rots,
@@ -574,64 +707,115 @@ def normalize_to_template(photo, tpl_path, scale=2.0, verify=True, paper=None,
     except Exception as e:                                   # noqa
         info["reason"] = f"lỗi căn mẫu: {e}"
         return info
-    info.update(quality=round(q, 3), rot=rot)
-    if H is None or q < MIN_VERIFY:
-        info["reason"] = f"không khớp mẫu (quality {q:.2f} < {MIN_VERIFY})"
-        return info
-    # H: mẫu -> ảnh, nên để warp ẢNH VỀ HỆ MẪU phải dùng S · H⁻¹
-    Ss = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]], np.float64)
-    M = Ss @ np.linalg.inv(np.asarray(H, np.float64))
-    warped = cv2.warpPerspective(im2, M, (int(Wt * scale), int(Ht * scale)),
-                                 flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
-
-    # ---- TINH CHỈNH LƯỚI (ICP trên vòng tròn in thật) ----
-    # Warp từ 4 mốc còn dư sai số 10-20 px (phối cảnh/méo ống kính) -> ô đọc
-    # lệch khỏi vòng, điểm tụt về 0. Ghép lại lưới ô với blob thật rồi warp lại
-    # từ ẢNH GỐC (không warp chồng lên ảnh đã warp để khỏi mất nét).
-    if cells:
-        Hc, hit = refine_grid_by_cells(warped, cells, scale)
-        if Hc is not None and hit >= 0.5:
-            M2 = Hc @ M          # áp hiệu chỉnh lưới lên ma trận warp ban đầu
-            cand = cv2.warpPerspective(im2, M2, (int(Wt * scale), int(Ht * scale)),
-                                       flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
-            info["grid_hit"] = round(float(hit), 3)
-            if cand is not None and cand.size:
-                warped = cand
-
-    # ---- KIỂM CHỨNG BẮT BUỘC: chống homography suy biến (ảnh warp trắng trơn
-    #      vẫn có thể cho quality 1.0 vì mọi ô cùng rơi vào một vùng sáng) ----
-    if verify:
-        quad, _ = template_fiducials(tpl_path)
-        cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
-        # ---- KIỂM CHỨNG BẰNG LƯỚI Ô ĐÁP ÁN (ICP) ----
-        # 4 mốc góc có thể bị che/mất (ảnh chụp gần, mốc mờ) -> cf chỉ 2-3/4
-        # dù warp vẫn ĐÚNG. Lưới ô đáp án (hàng trăm vòng tròn) là bằng chứng
-        # mạnh hơn nhiều: nếu >= 50 % tâm ô khớp vòng in thật thì nhận ảnh.
-        if cf < 1.0 and cells:
-            Hc, hit = refine_grid_by_cells(warped, cells, scale)
-            info["grid_hit"] = round(float(hit), 3)
-            if Hc is not None and hit >= 0.50:
-                M2 = Hc @ M
-                warped = cv2.warpPerspective(
-                    im2, M2, (int(Wt * scale), int(Ht * scale)),
-                    flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
-                M = M2
-                info["M_final"] = M2
-                info["refined"] = True
-                cf = max(cf, float(hit))
-        cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
-        ink = _ink_fraction(warped)
-        info["corner"] = round(cf, 2)
-        info["ink"] = round(ink, 3)
-        # Nhận ảnh nếu 4/4 mốc đúng HOẶC lưới ô đáp án khớp >= 50 %
-        if cf < 1.0 and float(info.get("grid_hit") or 0.0) < 0.50:
-            info["reason"] = f"chỉ {int(cf * 4)}/4 ô định vị nằm đúng chỗ"
+    ref = None              # lưới template (cho xoay tỉnh), dựng khi cần
+    # ---- 2 LƯỢT: (0) căn 4 hướng xoay; (1) XOAY TỈNH khi xác thực thất bại ----
+    for attempt in (0, 1):
+        info.update(quality=round(q, 3), rot=rot)
+        if H is None or q < MIN_ALIGN:
+            if _ink_fraction(img) < 0.015:
+                info["reason"] = ("ảnh gần như trắng/mờ (mực < 1.5 %) — không đủ "
+                                  "nét để căn mẫu, chụp lại rõ hơn")
+            else:
+                info["reason"] = f"không khớp mẫu (quality {q:.2f} < {MIN_ALIGN})"
             return info
-        if cf < 1.0:
-            info["reason"] = ""            # warp đã được xác nhận bằng lưới ô
+        # H: mẫu -> ảnh, nên để warp ẢNH VỀ HỆ MẪU phải dùng S · H⁻¹
+        Ss = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]], np.float64)
+        M = Ss @ np.linalg.inv(np.asarray(H, np.float64))
+        warped = cv2.warpPerspective(im2, M, (int(Wt * scale), int(Ht * scale)),
+                                     flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+
+        # ---- TINH CHỈNH LƯỚI (ICP trên vòng tròn in thật) ----
+        # Warp từ 4 mốc còn dư sai số 10-20 px (phối cảnh/méo ống kính) -> ô đọc
+        # lệch khỏi vòng, điểm tụt về 0. Ghép lại lưới ô với blob thật rồi warp lại
+        # từ ẢNH GỐC (không warp chồng lên ảnh đã warp để khỏi mất nét).
+        if cells:
+            Hc, hit = refine_grid_by_cells(warped, cells, scale)
+            if Hc is not None and hit >= 0.5:
+                M2 = Hc @ M          # áp hiệu chỉnh lưới lên ma trận warp ban đầu
+                cand = cv2.warpPerspective(im2, M2, (int(Wt * scale), int(Ht * scale)),
+                                           flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+                info["grid_hit"] = round(float(hit), 3)
+                if cand is not None and cand.size:
+                    warped = cand
+
+        # ---- KIỂM CHỨNG BẮT BUỘC: chống homography suy biến (ảnh warp trắng trơn
+        #      vẫn có thể cho quality 1.0 vì mọi ô cùng rơi vào một vùng sáng) ----
+        if verify:
+            quad, _ = template_fiducials(tpl_path)
+            cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
+            # ---- KIỂM CHỨNG BẰNG LƯỚI Ô ĐÁP ÁN (ICP) ----
+            # 4 mốc góc có thể bị che/mất (ảnh chụp gần, mốc mờ) -> cf chỉ 2-3/4
+            # dù warp vẫn ĐÚNG. Lưới ô đáp án (hàng trăm vòng tròn) là bằng chứng
+            # mạnh hơn nhiều: nếu >= 50 % tâm ô khớp vòng in thật thì nhận ảnh.
+            if cf < 1.0 and cells:
+                Hc, hit = refine_grid_by_cells(warped, cells, scale)
+                info["grid_hit"] = round(float(hit), 3)
+                if Hc is not None and hit >= 0.50:
+                    M2 = Hc @ M
+                    warped = cv2.warpPerspective(
+                        im2, M2, (int(Wt * scale), int(Ht * scale)),
+                        flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
+                    M = M2
+                    info["M_final"] = M2
+                    info["refined"] = True
+                    cf = max(cf, float(hit))
+            cf = _corner_check(warped, quad, scale) if len(quad) == 4 else 0.0
+            ink = _ink_fraction(warped)
+            info["corner"] = round(cf, 2)
+            info["ink"] = round(ink, 3)
+            # Nhận ảnh nếu 4/4 mốc đúng HOẶC lưới ô đáp án khớp >= 50 %
+            if cf < 1.0 and float(info.get("grid_hit") or 0.0) < 0.50:
+                if attempt == 0 and not ink_only:
+                    # ---- XOAY TỈNH: phiếu nghiêng 5-30° đối thứ tự 4 ô đen
+                    #      SAI (q ~1.0, corner 2/4) -> thử quay ảnh to->nhỏ
+                    #      tới khi bubble TRÙNG lưới mẫu rồi xác thực lại ----
+                    if ref is None:
+                        import omr_sheetgrid as _SG
+                        ref = _SG.build_template_cells(paper, tpl_path)
+                    found = _fine_rotation_search(tpl_path, ref, cells,
+                                                  H, im2, rot)
+                    if found is not None:
+                        H, im2, q, _dphi, rot = found
+                        info["fine_rot"] = _dphi
+                        continue            # xác thực lại với H mới
+                info["reason"] = f"chỉ {int(cf * 4)}/4 ô định vị nằm đúng chỗ"
+                return info
+            if cf < 1.0:
+                info["reason"] = ""            # warp đã được xác nhận bằng lưới ô
         if not (0.02 <= ink <= 0.50):
             info["reason"] = f"ảnh warp không giống phiếu (mực {ink:.1%})"
             return info
+        # ---- CỔNG BÁM MẪU (xác thực bám sát mẫu giấy đã chọn) ----
+        # hit của refine_grid_by_cells đếm MỌI blob gần vị trí ô (chữ số,
+        # khung, nét) nên phiếu in KHÁC layout vẫn đạt grid=1.0. Cổng này đếm
+        # VÒNG TRÒN IN đúng vị trí ô — theo TOÀN BỘ ô template ("ALL") hoặc
+        # theo từng phần — đo CHÍNH XÁC mức bám mẫu, phiếu in biến thể/sai
+        # mẫu bị TỪ CHỐI rõ ràng thay vì warp sai rồi chấm nhầm.
+        if cells:
+            mins = RING_MIN_PART.get(paper, {})
+            if "ALL" in mins:
+                all_cells = S.build_template_cells(paper, tpl_path)
+                rate, res = ring_grid_stats(warped, all_cells, scale)
+                info["ring_rate"] = round(rate, 2)
+                if rate < mins["ALL"]:
+                    info["reason"] = (f"phiếu KHÔNG bám sát mẫu đã chọn — chỉ "
+                                      f"{rate:.0%} ô trùng vòng in của mẫu "
+                                      f"(cần ≥ {mins['ALL']:.0%}). Kiểm tra "
+                                      "phiếu có đúng mẫu giấy này không.")
+                    return info
+            else:
+                prate = ring_part_rates(warped, cells, scale)
+                info["ring_part"] = {k: round(v, 2) for k, v in prate.items()}
+                bad = {k: v for k, v in prate.items()
+                       if v < mins.get(k, RING_MIN_DEFAULT)}
+                if prate and bad:
+                    info["reason"] = ("phiếu KHÔNG bám sát mẫu đã chọn — ô "
+                                      "trùng vòng in theo phần: "
+                                      + ", ".join(f"{k} {v:.0%}" for k, v
+                                                  in sorted(prate.items()))
+                                      + f"; không đạt: {sorted(bad)}")
+                    return info
+        break
     warped = normalize_light(warped)
     info.update(ok=True, warped=warped, H=H, reason="", src_img=im2)
     # ---- tuỳ chọn: NHẬN DẠNG + TÔ ĐEN các bubble đã tô (k-means 2 cụm) ----

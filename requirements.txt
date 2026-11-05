@@ -1,10 +1,14 @@
 # Dependencies for Streamlit Community Cloud (fengcheck.streamlit.app)
-streamlit>=1.38.0
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
-pillow>=10.0.0
-openpyxl>=3.1.0
-gdown>=5.0.0
-pandas>=2.0.0
-qrcode>=7.4.2
-pytesseract>=0.3.10
+# Khoảng version khớp với bản chạy local (.venv Python 3.12)
+streamlit>=1.66
+opencv-python-headless>=4.10
+numpy>=1.26
+pillow>=10.0
+openpyxl>=3.1
+gdown>=6.5
+pandas>=2.0
+
+# KHÔNG cài tensorflow trên cloud:
+#  - chỉ nhánh dự phòng "chữ số viết tay" (omr_ocr/omr_cnn) dùng nó
+#  - thiếu tensorflow thì _get_cnn() trả None và nhánh đó tự bỏ qua (đã try/except)
+#  - TensorFlow ~600 MB làm build chậm và dễ vượt giới hạn RAM của Streamlit Cloud

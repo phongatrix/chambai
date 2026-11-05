@@ -1,1 +1,20 @@
-{}
+{
+ "6ce0fe51": {
+  "file": "key_6ce0fe51.xlsx",
+  "desc": "Mẫu Smarttest: 4 đề × 28 câu ABCD (mã đề: 1132, 2109, 3157, 4185...)",
+  "name": "K12 - GK1 26-27",
+  "ts": "2026-11-04T06:03:38"
+ },
+ "142d2730": {
+  "file": "key_142d2730.xlsx",
+  "desc": "Mẫu Smarttest: 4 đề × 19 câu ABCD (mã đề: 132, 209, 357, 485...)",
+  "name": "K11 - GK1 26-27",
+  "ts": "2026-11-04T06:03:50"
+ },
+ "5eb2fcf5": {
+  "file": "key_5eb2fcf5.xlsx",
+  "desc": "Mẫu Smarttest: 4 đề × 19 câu ABCD (mã đề: 101, 102, 103, 104...)",
+  "name": "K10 - GK1 26-27",
+  "ts": "2026-11-04T06:04:02"
+ }
+}

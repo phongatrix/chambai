@@ -24,3 +24,6 @@ data/gdrive_in/
 
 # Git lock/tmp
 *.orig
+
+# Models lớn (>100MB vượt giới hạn GitHub)
+*.onnx

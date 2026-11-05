@@ -77,6 +77,25 @@ def keyed_cells(paper, tpl_path, key, de=None):
 
 # ---------- chấm 1 ảnh ----------
 
+def _md_read_strong(ids_detail):
+    """MÃ ĐỀ đọc từ lưới có ĐỦ CHẮC KHÔNG (ids_detail = ids['score']).
+
+    'Chắc' = MỌI cột của lưới Mã đề đều chọn ra chữ số (không '?') với mực thô
+    >= 0.55, vượt nền in >= 0.30 và gấp >= 2.5 lần số nhì. Dưới các ngưỡng này
+    (vd raw 0.48 / s1 0.23 / ratio 2.4) cách đọc coi là MƠ HỒ — chấm điểm mới
+    được phép phủ quyết. Ngưỡng hiệu chỉnh trên test12_20: trang 195843 (3157
+    chắc chắn: raw 0.87-1.0, ratio 3.7-33) phải PASS, trang 200014 (4185 mơ
+    hồ: raw 0.48-0.84, cột 1 ratio 2.4) phải FAIL."""
+    md = (ids_detail or {}).get("MD")
+    if not isinstance(md, list) or not md:
+        return False
+    try:
+        return all(v[1] >= 0 and v[2] >= 0.55 and v[3] >= 0.30
+                   and v[4] >= 2.5 for v in md)
+    except Exception:                                        # noqa
+        return False
+
+
 def _finish_grade(ph, H, cells, key, paper, made, thresh, ids, q,
                   photo_path, pre, tpl_path):
     """Phần dùng chung: đọc ô -> quyết định -> chọn đề -> trả kết quả."""
@@ -121,8 +140,13 @@ def _finish_grade(ph, H, cells, key, paper, made, thresh, ids, q,
     if made and made in key["các đề"]:
         use_de, md_source = made, "chỉ định"
     elif md_grid in key["các đề"]:
-        # xác nhận chéo: mã đề từ lưới phải có kết quả gần với đề khớp nhất
-        if scored[md_grid][0] >= scored[best_de][0] - 0.75:
+        # xác nhận chéo: mã đề từ lưới phải có kết quả gần với đề khớp nhất —
+        # TRỪ KHI lưới đọc RÕ (mỗi chữ số đủ mực và cách xa số nhì): khi đó
+        # TIN LƯỚI, vì "đề khớp điểm nhất" là nhiễu với học sinh bỏ trống nhiều
+        # (vd trang 195843: lưới đọc chắc 3157 raw 0.87-1.0 / ratio 3.7-33 nhưng
+        # điểm khớp nhất rơi vào đề 132 chỉ vì bài làm ít câu).
+        if _md_read_strong(ids_detail) or \
+                scored[md_grid][0] >= scored[best_de][0] - 0.75:
             use_de, md_source = md_grid, "lưới"
     tot, s1, s2, detail, stats, grid = scored[use_de]
 
@@ -425,10 +449,12 @@ def main():
         # chấm ảnh đã chuẩn hoá -> tên theo THỜI GIAN HIỆN HÀNH (có giây)
         stem = output_name_now(r) if args.normalize else output_name(ip, r)
         outp = out_dir / f"{stem}.jpg"
-        n = 1
+        # đổi tên CẢ stem (như webapp): tránh vòng lặp vô hạn khi trùng tên
+        base_stem, n = stem, 1
         while stem in used_names or outp.exists():
+            stem = f"{base_stem}_{n}"
+            outp = out_dir / f"{stem}.jpg"
             n += 1
-            outp = out_dir / f"{stem}_{n}.jpg"
         used_names.add(stem)
         S.render_result(r["img"], r["decided"], r["detail"], r["stats"], outp,
                         r["paper"], made=r["made"], s1=r["p1"], s2=r["p2"],

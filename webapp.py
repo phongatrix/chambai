@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """Web chấm trắc nghiệm (Streamlit) — chạy: .venv/bin/streamlit run webapp.py"""
+import faulthandler
 import io
 import json
+import signal
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -11,8 +15,68 @@ import streamlit as st
 
 import omr_key
 import omr_templates
+import cham_theo_mau as CTM
+
+# Chẩn đoán treo: kill -USR1 <pid> sẽ in stack TẤT CẢ thread ra log server
+faulthandler.register(signal.SIGUSR1, file=sys.stderr)
+
+
+class _StepTimeout(Exception):
+    """Một bước chấm/chuẩn hoá vượt quá thời gian cho phép (đang treo)."""
+
+
+def run_with_timeout(fn, timeout_s, *args, **kwargs):
+    """Chạy fn trong thread riêng với giới hạn thời gian.
+
+    Nếu vượt timeout -> raise _StepTimeout; script CHẤM TIẾP các trang còn lại
+    thay vì treo cả app. Lưu ý thread bị bỏ lại vẫn chạy (không kill được), nhưng
+    app và người dùng không bị khoá."""
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = ex.submit(fn, *args, **kwargs)
+        return fut.result(timeout=timeout_s)
+    except _FutTimeout:
+        raise _StepTimeout(f"vượt {timeout_s}s")
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _df_str(rows):
+    """Ép MỌI ô của bảng hiển thị về chuỗi — chống lỗi pyarrow ArrowInvalid
+    ('Could not convert ... tried to convert to int64') khi 1 cột trộn kiểu
+    (vd 'câu' = 1, 2, '2a'; 'ô đã tô' = 12, '-') — lỗi này làm BẢNG KHÔNG
+    HIỂN THỊ trên giao diện."""
+    return [{k: ("" if v is None else str(v)) for k, v in r.items()}
+            for r in rows]
 
 st.set_page_config(page_title="Chấm trắc nghiệm AI", page_icon="📝", layout="wide")
+
+# Tự RELOAD khi trình duyệt giữ chunk JS cũ (sau khi server khởi động lại,
+# chunk bất biến trong cache không khớp -> bảng/khu nội dung hiển thị TRỐNG).
+# Reload tối đa 1 lần / 10 giây để không lặp vô hạn.
+st.html("""
+<script>
+function handleChunkError() {
+    const lastReload = sessionStorage.getItem('last_chunk_reload');
+    const now = Date.now();
+    if (!lastReload || now - parseInt(lastReload) > 10000) {
+        sessionStorage.setItem('last_chunk_reload', now.toString());
+        window.location.reload();
+    }
+}
+window.addEventListener('vite:preloadError', handleChunkError);
+window.addEventListener('error', (e) => {
+    if (e && e.message && e.message.includes('dynamically imported module')) {
+        handleChunkError();
+    }
+});
+window.addEventListener('unhandledrejection', (e) => {
+    if (e && e.reason && (e.reason.message || '').includes('dynamically imported module')) {
+        handleChunkError();
+    }
+});
+</script>
+""", unsafe_allow_javascript=True)
 
 ROOT = Path(__file__).resolve().parent
 OUTDIR = ROOT / "output"
@@ -27,7 +91,9 @@ st.title("📝 Hệ thống chấm trắc nghiệm bằng AI")
 
 
 def load_registry():
-    """Nạp registry key; tự loại key hệ thống cũ (builtin-gk1) và key thiếu file."""
+    """Nạp registry key; tự loại key hệ thống cũ (builtin-gk1) và key thiếu file.
+    Tự PHỤC HỒI key còn file nhưng thiếu entry registry (chống mất danh sách
+    'Các đáp án đã lưu' sau khi khởi động lại/đồng bộ mà thiếu registry.json)."""
     reg = json.loads(REG.read_text(encoding="utf-8")) if REG.is_file() else {}
     changed = False
     for kid in list(reg):
@@ -35,6 +101,19 @@ def load_registry():
         f = KEY_DIR / fname
         if kid == "builtin-gk1" or fname.endswith("builtin.json") or not f.is_file():
             reg.pop(kid)
+            changed = True
+    # Self-heal: file key_<id>.xlsx tồn tại nhưng chưa có trong registry
+    for f in sorted(KEY_DIR.glob("key_*.xlsx")):
+        kid = f.stem[4:]
+        if kid and kid not in reg:
+            try:
+                _, _, desc = omr_key.detect_key_format(f)
+            except Exception:                                    # noqa
+                desc = ""
+            reg[kid] = {"file": f.name, "desc": desc or f.name,
+                        "name": desc or f.name,
+                        "ts": datetime.fromtimestamp(f.stat().st_mtime)
+                              .isoformat(timespec="seconds")}
             changed = True
     if changed:
         REG.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -143,46 +222,122 @@ def normalize_batch(paths, tpl_path, paper, key, out_dir, progress=None,
     `key` = key_data đã nạp (dict có 'các đề') HOẶC đường dẫn file .xlsx.
     Trả (ok_paths, report_rows). Mỗi ảnh ghi 2 bản: *_chuan.jpg (dùng để chấm)
     và *_todam.jpg (bubble đã tô được tô đen để kiểm tra bằng mắt).
+
+    CHẠY SONG SONG: >=3 ảnh thì chia cho tối đa 4 tiến trình con (module
+    omr_webprep, fork — không re-execute app như spawn; worker chỉ dùng
+    cv2/numpy, không đụng TF); lỗi thì rơi về chạy tuần tự như cũ.
+    ok_paths/ink_paths LUÔN ĐỒNG BỘ THEO THỨ TỰ
+    `paths` (ảnh fail -> None) — trước đây ảnh fail làm LỆCH CHỈ SỐ và các
+    trang sau nó bị chấm nhầm ảnh của trang kế bên.
     """
-    import omr_prep as PREP
     import cv2 as _cv
     if isinstance(key, (str, Path)):
         _fmt, key, _ = omr_key.detect_key_format(key)
     cells = CTM.keyed_cells(paper, tpl_path, key)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ok_paths, rows, ink_paths, extras = [], [], [], []
-    for i, ip in enumerate(paths, 1):
-        if progress is not None:
-            progress.progress(i / max(1, len(paths)),
-                              text=f"Chuẩn hoá {i}/{len(paths)}: {Path(ip).name}")
-        info = PREP.normalize_to_template(ip, tpl_path, scale=2.0, cells=cells,
-                                          ink=ink, ink_only=ink_only)
-        if info.get("ok"):
-            dst = out_dir / f"{Path(ip).stem}_chuan.jpg"
-            _cv.imwrite(str(dst), info["warped"], [_cv.IMWRITE_JPEG_QUALITY, 95])
-            ok_paths.append(dst)
-            if info.get("inked") is not None:
-                _cv.imwrite(str(out_dir / f"{Path(ip).stem}_todam.jpg"),
-                            info["inked"], [_cv.IMWRITE_JPEG_QUALITY, 95])
-                ink_paths.append(str(out_dir / f"{Path(ip).stem}_todam.jpg"))
-            extras.append({"ids": info.get("ids_result"),
-                           "quality": info.get("quality", 1.0),
-                           "rot": info.get("rot", 0)})
-            st = info.get("ink_stats") or {}
-            rows.append({"file": Path(ip).name,
-                         "chuẩn hoá": "chỉ tô đậm" if ink_only else "✓",
-                         "xoay": f"{info['rot']}°",
-                         "khớp mẫu": round(info["quality"], 2),
-                         "ô đã tô": st.get("n_filled", "-"),
-                         "ghi chú": ""})
-        else:
-            rows.append({"file": Path(ip).name, "chuẩn hoá": "✗", "xoay": "-",
-                         "khớp mẫu": round(info.get("quality", 0.0), 2),
-                         "ô đã tô": "-", "ghi chú": info.get("reason", "")})
-            ink_paths.append(None)
-            extras.append({"ids": None, "quality": 0.0, "rot": 0})
+    paths = [Path(p) for p in paths]
+    n = len(paths)
+    ok_paths = [None] * n
+    ink_paths = [None] * n
+    rows = [None] * n
+    extras = [None] * n
+
+    def _put(i, res):
+        if res.get("ok"):
+            ok_paths[i] = Path(res["ok_path"])
+            ink_paths[i] = res.get("ink_path")
+        rows[i] = res["row"]
+        extras[i] = res["extras"]
+
+    results = None
+    if n >= 3:
+        # ---- SONG SONG (4 tiến trình, giữ thứ tự ảnh vào) ----
+        try:
+            import multiprocessing as _mp
+            import omr_webprep as _WP
+            tasks = [{"path": str(p), "tpl": str(tpl_path), "paper": paper,
+                      "cells": cells, "out": str(out_dir), "ink": bool(ink),
+                      "ink_only": bool(ink_only)} for p in paths]
+            n_w = min(4, max(1, (_mp.cpu_count() or 2) - 1))
+            # fork (KHÔNG spawn): spawn re-execute module chính — với webapp.py
+            # nghĩa là chạy lại cả app Streamlit trong tiến trình con. fork chỉ
+            # sao chép bộ nhớ; worker (prep_one) chỉ dùng cv2/numpy, không đụng
+            # TF nên không vướng khoá của thread TF.
+            ctx = _mp.get_context("fork")
+            # 1 thread OpenCV mỗi tiến trình: n worker = n lõi, hết tranh chấp.
+            # PHẢI set ở CHA TRƯỚC KHI fork (set trong con = deadlock vì
+            # thread-pool cv2 của cha bị fork ở trạng thái giữ khoá).
+            _cv_thr = (_cv.getNumThreads()
+                       if hasattr(_cv, "getNumThreads") else 0)
+            _cv.setNumThreads(1)
+            try:
+                with ctx.Pool(n_w) as pool:
+                    for i, res in enumerate(pool.imap(_WP.prep_one, tasks)):
+                        if progress is not None:
+                            progress.progress((i + 1) / max(1, n),
+                                              text=f"Đang chuẩn hoá {i + 1}/{n} ảnh: "
+                                                   f"{paths[i].name}")
+                        results = True
+                        _put(i, res)
+            finally:
+                # trả lại thread cho khâu chấm/vẽ (0 = mặc định dùng hết lõi)
+                _cv.setNumThreads(_cv_thr)
+        except Exception as _e:                              # noqa
+            # bất ngờ (vd không fork được) -> tuần tự; ghi rõ lý do vào log
+            import traceback as _tb
+            print(f"[normalize_batch] nhánh song song lỗi ({_e!r}), "
+                  "chuyển tuần tự:\n" + _tb.format_exc(), file=sys.stderr)
+            results = None
+            ok_paths = [None] * n
+            ink_paths = [None] * n
+            rows = [None] * n
+            extras = [None] * n
+    if results is None:
+        # ---- TUẦN TỰ (dự phòng / <3 ảnh) — logic giữ nguyên từ bản cũ ----
+        for i, ip in enumerate(paths, 1):
+            if progress is not None:
+                progress.progress(i / max(1, n),
+                                  text=f"Đang chuẩn hoá {i}/{n} ảnh: {ip.name}")
+            try:
+                import omr_prep as PREP
+                info = PREP.normalize_to_template(ip, tpl_path, scale=2.0,
+                                                  cells=cells, ink=ink,
+                                                  ink_only=ink_only)
+            except Exception as e:                           # noqa
+                info = {"ok": False, "quality": 0.0, "rot": 0,
+                        "reason": f"lỗi xử lý: {e}"}
+            _put(i - 1, _WP_RESULT(ip, info, out_dir, ink_only))
     return ok_paths, rows, ink_paths, extras
+
+
+def _WP_RESULT(ip, info, out_dir, ink_only):
+    """Đóng gói kết quả 1 ảnh theo đúng format omr_webprep.prep_one."""
+    import cv2 as _cv
+    if info.get("ok"):
+        dst = out_dir / f"{Path(ip).stem}_chuan.jpg"
+        _cv.imwrite(str(dst), info["warped"], [_cv.IMWRITE_JPEG_QUALITY, 95])
+        ink_path = None
+        if info.get("inked") is not None:
+            td = out_dir / f"{Path(ip).stem}_todam.jpg"
+            _cv.imwrite(str(td), info["inked"], [_cv.IMWRITE_JPEG_QUALITY, 95])
+            ink_path = str(td)
+        st_ = info.get("ink_stats") or {}
+        return {"ok": True, "ok_path": str(dst), "ink_path": ink_path,
+                "row": {"file": Path(ip).name,
+                        "chuẩn hoá": "chỉ tô đậm" if ink_only else "✓",
+                        "xoay": f"{info['rot']}°",
+                        "khớp mẫu": round(info["quality"], 2),
+                        "ô đã tô": st_.get("n_filled", "-"),
+                        "ghi chú": ""},
+                "extras": {"ids": info.get("ids_result"),
+                           "quality": info.get("quality", 1.0),
+                           "rot": info.get("rot", 0)}}
+    return {"ok": False, "ok_path": None, "ink_path": None,
+            "row": {"file": Path(ip).name, "chuẩn hoá": "✗", "xoay": "-",
+                    "khớp mẫu": round(info.get("quality", 0.0), 2),
+                    "ô đã tô": "-", "ghi chú": info.get("reason", "")},
+            "extras": {"ids": None, "quality": 0.0, "rot": 0}}
 
 
 def make_result_pdf(img_paths, out_pdf, max_side=1600):
@@ -287,12 +442,28 @@ def save_run_db(source, results):
         st.warning(f"Lưu CSDL bỏ qua: {e}")
 
 
-tab_key, tab_sheet, tab_tpl = st.tabs(
-    ["📋 Đáp án & QR", "🟩 Chấm theo mẫu",
-     "🎯 Mẫu giấy & lưới đáp án"])
+LBL_KEY, LBL_SHEET, LBL_TPL = ("📋 Đáp án & QR", "🟩 Chấm theo mẫu",
+                               "🎯 Mẫu giấy & lưới đáp án")
+nav = st.radio("Tab:", [LBL_KEY, LBL_SHEET, LBL_TPL], horizontal=True,
+               key="tab_nav", label_visibility="collapsed")
+if nav == LBL_KEY and st.session_state.get("tab_prev") != LBL_KEY:
+    # VỪA CHUYỂN sang tab '📋 Đáp án & QR' -> RESET TOÀN BỘ tab '🟩 Chấm
+    # theo mẫu' về trạng thái ban đầu (xoá kết quả chấm, ảnh chuẩn hoá,
+    # ảnh upload, link Drive, mã đề cố định; uploader ảnh mới hoàn toàn).
+    for k_ in ("sheet_res", "prep_res", "prep_sig", "prep_cache",
+               "gdrive_files", "gdrive_report", "gdrive_stamp",
+               "paper_det", "paper_det_sig", "sheet_gdrive_links",
+               "sheet_made", "prep_table", "sheet_res_table",
+               "sheet_norm_zip"):
+        st.session_state.pop(k_, None)
+    st.session_state["sheet_norm"] = True
+    st.session_state.pop(f"sheet_files_{st.session_state.get('round_no', 0)}",
+                         None)
+    st.session_state["round_no"] = st.session_state.get("round_no", 0) + 1
+st.session_state["tab_prev"] = nav
 
 # ---------------- TAB 0: MẪU GIẤY & LƯỚI ĐÁP ÁN ----------------
-with tab_tpl:
+if nav == LBL_TPL:
     st.markdown("**Quy trình:** ① chọn mẫu giấy → ② nạp đáp án (tab 📋) → ⓪ tự động "
                 "chuẩn hoá ảnh + tô đậm bubble (kể cả SBD, mã đề) → ③ ảnh vào sẽ "
                 "khớp lưới → đúng/sai → điểm.")
@@ -315,9 +486,10 @@ with tab_tpl:
             c1.metric("Số đề", grid["số_đề"])
             c2.metric("Số câu", grid["số_câu"])
             c3.metric("Số ô đáp án", grid["số_ô"])
-            st.dataframe([{"câu": r["câu"], "phần": r["phần"], "loại": r["loại"],
-                           "đáp án": r["đáp án"], "vị trí trên phiếu": r["vị trí"],
-                           "đề": r["đề"]} for r in grid["ô"]],
+            st.dataframe(_df_str([{"câu": r["câu"], "phần": r["phần"],
+                                   "loại": r["loại"], "đáp án": r["đáp án"],
+                                   "vị trí trên phiếu": r["vị trí"],
+                                   "đề": r["đề"]} for r in grid["ô"]]),
                          width="stretch", hide_index=True)
             st.download_button("⬇️ Tải lưới đáp án (JSON)",
                                data=json.dumps(grid, ensure_ascii=False, indent=1),
@@ -326,10 +498,9 @@ with tab_tpl:
         st.warning("⚠️ Mẫu này chưa hiệu chuẩn hình học — chấm sẽ dùng auto-detect.")
 
 # ---------------- TAB 1b: CHẤM THEO MẪU (FIDUCIAL) ----------------
-with tab_sheet:
+if nav == LBL_SHEET:
     import json as _json
     import omr_sheetgrid as SG
-    import cham_theo_mau as CTM
 
     st.markdown("**Quy trình:** chọn mẫu giấy → chọn đáp án (tab 📋 Đáp án & QR) → "
                 "tải ảnh → hệ thống khớp ảnh với mẫu bằng **ô đen định vị**, "
@@ -353,18 +524,21 @@ with tab_sheet:
         paper = st.selectbox("① Mẫu giấy:", list(TPL_CHOICES),
                              format_func=lambda k: TPL_CHOICES[k][0])
     tpl_path = TPL_CHOICES[paper][1]
+    # 2026-11-05: hiển thị TÊN ĐÁP ÁN ĐÃ CHỌN kế bên "① Mẫu giấy:"
+    # (các mục lưới đáp án / tải JSON / Mã đề nằm gọn trong '⚙️ Nâng cao'
+    # bên dưới — chức năng vẫn nguyên vẹn)
     with c_keyf:
         if key_names:
             st.markdown("**② Đáp án đã chọn:**  \n" + " · ".join(key_names))
         else:
-            st.warning("② Chưa chọn đáp án — chọn dòng trong bảng "
+            st.caption("② Chưa chọn đáp án — chọn dòng trong bảng "
                        "'Các đáp án đã lưu' ở tab '📋 Đáp án & QR'.")
-
+    # mặc định: hệ thống tự chọn mã đề (đọc lưới / suy đáp án)
+    fixed_made = ""    # (nếu nhập trong '⚙️ Nâng cao' thì dùng giá trị đó)
     if not Path(tpl_path).is_file():
         st.error(f"Không thấy ảnh mẫu: {tpl_path}")
     elif _key_sel is None:
-        st.info("Hãy upload Excel đáp án và CHỌN DÒNG key ở tab '📋 Đáp án & QR' "
-                "— lần chấm sẽ dùng đúng đáp án đã chọn.")
+        pass    # nút Chấm đã tự khoá khi thiếu key
     else:
         try:
             cells = SG.build_template_cells(paper, tpl_path)
@@ -374,22 +548,28 @@ with tab_sheet:
             cc2.metric("Ô PHẦN I", len([c for c in cells if c[0] == "P1"]))
             cc3.metric("Ô PHẦN II", len([c for c in cells if c[0] == "P2"]))
             cc4.metric("Ô SBD/Mã đề", len(id_cells))
-            st.caption(f"Đáp án: {', '.join(key_names)}")
-            de0 = list(_key_sel["các đề"])[0]
-            g0 = SG.build_answer_grid(paper, tpl_path, _key_sel["các đề"][de0])
-            rows0 = [{"phần": p, "câu": (q if isinstance(q, int) else f"{q[0]}{q[1]}"),
-                      "lựa chọn": o, "đáp án": g0["answers"].get((p, q, o)),
-                      "toạ độ mẫu": f"({x:.0f},{y:.0f})"}
-                     for (p, q, o, x, y) in cells[:80]]
-            with st.expander(f"🔎 Xem lưới đáp án đề {de0} (80 ô đầu)"):
-                st.dataframe(rows0, width="stretch", hide_index=True)
-            st.download_button("⬇️ Tải lưới đáp án đầy đủ (JSON)",
-                               data=_json.dumps([{"phần": p, "câu": str(q), "lựa_chọn": o,
-                                                  "đáp_án": g0["answers"].get((p, q, o)),
-                                                  "x": round(x, 1), "y": round(y, 1)}
-                                                 for (p, q, o, x, y) in cells],
-                                                ensure_ascii=False, indent=1),
-                               file_name=f"luoi_dap_an_{paper}_{de0}.json")
+            with st.expander("⚙️ Nâng cao", expanded=False):
+                de0 = list(_key_sel["các đề"])[0]
+                g0 = SG.build_answer_grid(paper, tpl_path,
+                                          _key_sel["các đề"][de0])
+                rows0 = [{"phần": p,
+                          "câu": (q if isinstance(q, int) else f"{q[0]}{q[1]}"),
+                          "lựa chọn": o, "đáp án": g0["answers"].get((p, q, o)),
+                          "toạ độ mẫu": f"({x:.0f},{y:.0f})"}
+                         for (p, q, o, x, y) in cells[:80]]
+                st.dataframe(_df_str(rows0), width="stretch",
+                             hide_index=True)
+                st.download_button("⬇️ Tải lưới đáp án đầy đủ (JSON)",
+                                   data=_json.dumps(
+                                       [{"phần": p, "câu": str(q),
+                                         "lựa_chọn": o,
+                                         "đáp_án": g0["answers"].get((p, q, o)),
+                                         "x": round(x, 1), "y": round(y, 1)}
+                                        for (p, q, o, x, y) in cells],
+                                       ensure_ascii=False, indent=1),
+                                   file_name=f"luoi_dap_an_{paper}_{de0}.json")
+                fixed_made = st.text_input(
+                    "Mã đề (bỏ trống = tự chọn)", value="", key="sheet_made")
         except Exception as _e:  # noqa
             st.warning(f"Chưa dựng được lưới: {_e}")
 
@@ -415,7 +595,8 @@ with tab_sheet:
             st.session_state["gdrive_report"] = report
             st.session_state["gdrive_stamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
             if report and len(report):
-                st.dataframe(report, width="stretch", hide_index=True)
+                st.dataframe(_df_str(report), width="stretch",
+                             hide_index=True)
             if len(pages):
                 st.success(f"Đã lấy {len(pages)} ảnh từ Google Drive.")
             else:
@@ -428,9 +609,8 @@ with tab_sheet:
         except Exception as e:                                   # noqa
             st.error(f"Lỗi khi lấy ảnh từ Google Drive: {e}")
     gdrive_files = st.session_state.get("gdrive_files") or []
-    c_made, c_btn = st.columns([1, 2])
-    with c_made:
-        fixed_made = st.text_input("Mã đề (bỏ trống = tự chọn)", value="", key="sheet_made")
+    # (fixed_made: nếu key đã chọn thì lấy từ mục '⚙️ Nâng cao' ở trên; nếu
+    #  chưa chọn key thì rỗng = hệ thống tự chọn mã đề)
     norm_on = st.checkbox(
         "⓪ Chuẩn hoá ảnh về đúng mẫu trước khi chấm (tự xoay 4 hướng + khử nghiêng/phối cảnh)",
         value=True, key="sheet_norm",
@@ -440,6 +620,39 @@ with tab_sheet:
     # ---- ⓪ TIỀN XỬ LÝ TỰ ĐỘNG: chuẩn hoá + nhận dạng & TÔ ĐEN bubble ----
     # Nguồn ảnh = ảnh upload + ảnh đã lấy từ Google Drive
     gdrive_files = st.session_state.get("gdrive_files") or []
+    # ---- TỰ DÒ MẪU GIẤY theo ảnh đầu tiên: nếu mẫu đang chọn KHÔNG khớp mà
+    #      mẫu kia khớp được (corner/lưới xác nhận) thì tự chuyển, khỏi báo lỗi
+    #      'không khớp mẫu' chỉ vì quên đổi selectbox (vd phiếu 10_11 đang để
+    #      mẫu 12). Chỉ ghi đè khi có mẫu XÁC NHẬN ĐƯỢC (ok=True).
+    _first = files_s[0] if files_s else (Path(gdrive_files[0])
+                                         if gdrive_files else None)
+    if _first is not None and len(TPL_CHOICES) > 1:
+        try:
+            _sigd = (str(_first), _first.stat().st_size
+                     if hasattr(_first, "stat") else len(_first.getvalue()))
+        except Exception:                                    # noqa
+            _sigd = str(_first)
+        if st.session_state.get("paper_det_sig") != _sigd:
+            import omr_prep as _PREP
+            _det, _det_q = paper, -1.0
+            for _p, (_lbl, _tp) in TPL_CHOICES.items():
+                try:
+                    _i = _PREP.normalize_to_template(_first, _tp, scale=1.0,
+                                                     ink=False)
+                    _s = (float(_i.get("quality") or 0.0)
+                          if _i.get("ok") else -1.0)
+                except Exception:                            # noqa
+                    _s = -1.0
+                if _s > _det_q:
+                    _det, _det_q = _p, _s
+            st.session_state["paper_det_sig"] = _sigd
+            st.session_state["paper_det"] = _det
+        _pd = st.session_state.get("paper_det")
+        if _pd and _pd != paper and _pd in TPL_CHOICES:
+            st.info(f"📌 Ảnh upload là phiếu mẫu '{TPL_CHOICES[_pd][0]}' — "
+                    "hệ thống TỰ CHUYỂN mẫu giấy (bỏ chọn mẫu cũ).")
+            paper = _pd
+            tpl_path = TPL_CHOICES[paper][1]
     prep_ready = (files_s or gdrive_files) and Path(tpl_path).is_file() \
         and _key_sel is not None
     with st.expander("⓪ Ảnh đã chuẩn hoá & tô đậm bubble (bấm dòng để so sánh)",
@@ -449,35 +662,76 @@ with tab_sheet:
         else:
             sig = (tuple((u.name, len(u.getvalue())) for u in files_s),
                    tuple(gdrive_files), paper, tuple(kids_sel), bool(norm_on))
+            # ---- CACHE kết quả chuẩn hoá THEO TỔ HỢP LỰA CHỌN ----
+            # Chọn lại dòng key ở tab 'Đáp án & QR' (hoặc selection mất khi
+            # chuyển tab) làm prep_sig đổi -> trước đây chuẩn hoá CHẠY LẠI
+            # TỪ ĐẦU và xoá sạch nội dung tab 'Chấm theo mẫu'. Giờ mỗi tổ hợp
+            # đã tính được lưu lại (tối đa 4) — quay lại lựa chọn cũ là có NGAY.
+            prep_cache = st.session_state.setdefault("prep_cache", {})
             if st.session_state.get("prep_sig") != sig:
-                stamp_n = datetime.now().strftime("%Y%m%d_%H%M%S")
-                destn = SHEET_DIR / f"norm_{stamp_n}"
-                destn.mkdir(parents=True, exist_ok=True)
-                pths = []
-                for u in files_s:                      # ảnh upload
-                    q = destn / u.name
-                    q.write_bytes(u.getvalue())
-                    pths.append(q)
-                for gp in gdrive_files:                # ảnh đã lấy từ Drive
-                    pths.append(Path(gp))
-                pr = st.progress(0.0,
-                                 text=("Đang chuẩn hoá & tô đậm..." if norm_on
-                                       else "Đang tô đậm bubble..."))
-                ok_paths, rep, ink_paths, extras = normalize_batch(
-                    pths, tpl_path, paper, _key_sel, destn / "chuan_hoa", pr,
-                    ink_only=not norm_on)
-                pr.empty()
-                st.session_state["prep_sig"] = sig
-                st.session_state["prep_res"] = {
-                    "rows": rep, "ok": [str(x) for x in ok_paths],
-                    "ink": ink_paths, "orig": [str(x) for x in pths],
-                    "extras": extras,
-                    "out": str(destn / "chuan_hoa"), "stamp": stamp_n}
+                if sig in prep_cache:
+                    st.session_state["prep_sig"] = sig
+                    st.session_state["prep_res"] = prep_cache[sig]
+                else:
+                    stamp_n = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    destn = SHEET_DIR / f"norm_{stamp_n}"
+                    destn.mkdir(parents=True, exist_ok=True)
+                    pths = []
+                    for u in files_s:                      # ảnh upload
+                        q = destn / u.name
+                        q.write_bytes(u.getvalue())
+                        pths.append(q)
+                    for gp in gdrive_files:                # ảnh đã lấy từ Drive
+                        pths.append(Path(gp))
+                    n_p = len(pths)
+                    pr = st.progress(0.0,
+                                     text=(f"Đang chuẩn hoá 0/{n_p} ảnh..." if norm_on
+                                           else f"Đang tô đậm bubble 0/{n_p} ảnh..."))
+                    # CHẠY TRỰC TIẾP trong script thread để cập nhật progress
+                    # "i/N: tên ảnh" (Streamlit chỉ cho update widget từ script
+                    # thread — bản run_with_timeout trước đây làm mất progress;
+                    # an toàn vì bug treo đã sửa tận gốc + chuẩn hoá chạy song song)
+                    try:
+                        ok_paths, rep, ink_paths, extras = normalize_batch(
+                            pths, tpl_path, paper, _key_sel,
+                            destn / "chuan_hoa", pr, ink=True,
+                            ink_only=not norm_on)
+                    except Exception as e:                           # noqa
+                        pr.empty()
+                        st.error(f"⓪ Chuẩn hoá lỗi: {e} — thử lại; nếu lặp lại "
+                                 "hãy chụp lại ảnh rõ hơn (đủ 4 mốc đen ở góc).")
+                        st.stop()
+                    pr.empty()
+                    st.session_state["prep_sig"] = sig
+                    st.session_state["prep_res"] = {
+                        "rows": rep,
+                        "ok": [str(x) if x else None for x in ok_paths],
+                        "ink": [x if x else None for x in ink_paths], "orig": [str(x) for x in pths],
+                        "extras": extras,
+                        "out": str(destn / "chuan_hoa"), "stamp": stamp_n}
+                    prep_cache[sig] = st.session_state["prep_res"]
+                    while len(prep_cache) > 4:             # giữ tối đa 4 tổ hợp
+                        prep_cache.pop(next(iter(prep_cache)))
             res = st.session_state.get("prep_res")
             if res:
+                # ---- THỐNG KÊ chuẩn hoá: tổng / đã chuẩn hoá / không chuẩn hoá ----
+                _n_total = len(res.get("orig") or [])
+                _n_ok = sum(1 for x in (res.get("ok") or []) if x)
+                _n_fail = _n_total - _n_ok
+                sm1, sm2, sm3 = st.columns(3)
+                sm1.metric("Tổng số ảnh", _n_total)
+                sm2.metric("Đã chuẩn hoá",
+                           f"{_n_ok}/{_n_total}",
+                           delta=f"{_n_ok / _n_total:.0%}" if _n_total else None,
+                           delta_color="off")
+                sm3.metric("Không chuẩn hoá được",
+                           _n_fail,
+                           delta=f"{_n_fail / _n_total:.0%}" if _n_total else None,
+                           delta_color="inverse")
                 st.caption("👉 Bấm vào một dòng để xem Ảnh gốc và ảnh đã "
                            "Chuẩn hoá / Tô đậm bên dưới.")
-                psel = st.dataframe(res["rows"], width="stretch", hide_index=True,
+                psel = st.dataframe(_df_str(res["rows"]), width="stretch",
+                                    hide_index=True,
                                     on_select="rerun", selection_mode="single-row",
                                     key="prep_table")
                 prows = list(getattr(psel.selection, "rows", []) or []) \
@@ -497,7 +751,9 @@ with tab_sheet:
                 import zipfile
                 buf = io.BytesIO()
                 with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                    for pth in map(Path, res["ok"]):
+                    for pth in map(Path, [x for x in res["ok"] if x]):
+                        if not Path(pth).is_file():
+                            continue
                         z.write(pth, pth.name)
                         td = pth.parent / f"{pth.stem.replace('_chuan', '')}_todam.jpg"
                         if td.is_file():
@@ -513,7 +769,7 @@ with tab_sheet:
                      help="Xoá kết quả đợt hiện tại và nạp ảnh của đợt mới; "
                           "giữ nguyên mẫu giấy + đáp án đã chọn."):
             st.session_state["round_no"] = st.session_state.get("round_no", 0) + 1
-            for k_ in ("sheet_res", "prep_res", "prep_sig",
+            for k_ in ("sheet_res", "prep_res", "prep_sig", "prep_cache",
                        "gdrive_files", "gdrive_report"):
                 st.session_state.pop(k_, None)
             st.rerun()
@@ -541,7 +797,7 @@ with tab_sheet:
             paths.append(Path(use))
             path_ok.append(True)
         _key = _key_sel
-        prog = st.progress(0.0, text="Đang khớp mẫu...")
+        prog = st.progress(0.0, text=f"Đang chấm 0/{len(paths)} bài...")
         outd = OUTDIR / "theo_mau" / f"web_{stamp}"
         outd.mkdir(parents=True, exist_ok=True)
         rows_out, details, rendered, used = [], [], [], set()
@@ -551,7 +807,8 @@ with tab_sheet:
             # tên hiển thị = tên ẢNH GỐC (bỏ hậu tố _todam/_chuan của bước ⓪)
             disp = Path(res_p["orig"][i - 1]).name if (i - 1) < len(res_p["orig"]) \
                 else ip.name
-            prog.progress(i / max(1, len(paths)), text=f"{disp} ({i}/{len(paths)})")
+            prog.progress(i / max(1, len(paths)),
+                          text=f"Đang chấm {i}/{len(paths)} bài: {disp}")
             # Ảnh vào đã chuẩn hoá ở bước ⓪ và SBD/Mã đề đã đọc sẵn -> chấm
             # trực tiếp, KHÔNG căn lại / KHÔNG quét ID lần 2 (nhanh gấp đôi)
             ex = res_p.get("extras") or []
@@ -564,10 +821,20 @@ with tab_sheet:
                                  "ghi chú": "bước ⓪ không chuẩn hoá được — xem bảng ⓪"})
                 row_meta.append({"img": None, "sbd": None, "made": None, "file": disp})
                 continue
-            r = CTM.grade_prepared(ip, paper, tpl_path, _key,
-                                   ids=ex_i.get("ids"),
-                                   made=(fixed_made or None),
-                                   quality=ex_i.get("quality", 1.0))
+            try:
+                r = run_with_timeout(
+                    CTM.grade_prepared, 120, ip, paper, tpl_path, _key,
+                    ids=ex_i.get("ids"), made=(fixed_made or None),
+                    quality=ex_i.get("quality", 1.0))
+            except _StepTimeout as e:
+                rows_out.append({"file": disp, "chuẩn hoá": "-", "SBD": "-",
+                                 "mã đề": "-", "nguồn": "-", "khớp mẫu": 0.0,
+                                 "P1": "-", "P2": "-", "tổng": 0, "sai": 0,
+                                 "trống/nhiều": 0,
+                                 "ghi chú": f"⚠ chấm quá lâu ({e}) — bỏ qua trang"})
+                row_meta.append({"img": None, "sbd": None, "made": None,
+                                 "file": disp})
+                continue
             if r is None:
                 rows_out.append({"file": disp, "chuẩn hoá": "✗", "SBD": "-", "mã đề": "-",
                                  "nguồn": "-", "khớp mẫu": 0.0, "P1": "-", "P2": "-",
@@ -590,17 +857,27 @@ with tab_sheet:
                 dup_counts[dup_key] = 1
                 stem = base_name
             outp = outd / f"{stem}.jpg"
-            n = 1
+            # ĐỔI TÊN CẢ `stem` (trước đây chỉ đổi outp => khi 2 trang cùng
+            # mã đề (phiếu 10_11 không SBD -> NA_<đề>_<giờ>) được chấm trong
+            # CÙNG 1 GIÂY thì `stem in used` đúng mãi -> VÒNG LẶP VÔ HẠN
+            # 100 % CPU — đúng 2 lần treo 17:16 và 22:29).
+            base_stem, n = stem, 1
             while stem in used or outp.exists():
+                stem = f"{base_stem}_{n}"
+                outp = outd / f"{stem}.jpg"
                 n += 1
-                outp = outd / f"{stem}_{n}.jpg"
             used.add(stem)
-            SG.render_result(r["img"], r["decided"], r["detail"], r["stats"], outp,
-                             paper, made=r["made"], s1=r["p1"], s2=r["p2"],
-                             sbd=r.get("sbd"), ids=r.get("ids"), show_sbd=True,
-                             md_inferred=(r.get("made_source") != "lưới"),
-                             md_note="", tpl_path=tpl_path)
-            rendered.append(outp)
+            try:
+                run_with_timeout(
+                    SG.render_result, 120, r["img"], r["decided"], r["detail"],
+                    r["stats"], outp, paper, made=r["made"], s1=r["p1"],
+                    s2=r["p2"], sbd=r.get("sbd"), ids=r.get("ids"),
+                    show_sbd=True, md_inferred=(r.get("made_source") != "lưới"),
+                    md_note="", tpl_path=tpl_path)
+            except _StepTimeout:
+                outp = None
+            if outp is not None:
+                rendered.append(outp)
             n_wrong = sum(1 for v in r["detail"].values() if v[0] == "wrong")
             n_unk = sum(1 for v in r["detail"].values() if v[0] in ("blank", "multi"))
             pn = r.get("pre_norm") or {}
@@ -614,7 +891,8 @@ with tab_sheet:
                              "tổng": r["score"], "sai": n_wrong, "trống/nhiều": n_unk,
                              "ghi chú": ""})
             details.append({"file": disp, "made": r["made"], "detail": r["detail"]})
-            row_meta.append({"img": str(outp), "sbd": r.get("sbd"),
+            row_meta.append({"img": (str(outp) if outp else None),
+                             "sbd": r.get("sbd"),
                              "made": r["made"], "file": disp})
         # ---- SẮP THỨ TỰ THEO TÊN FILE ẢNH KẾT QUẢ ----
         # (vd NA_132_20261103_104757.jpg, NA_209_...): Excel + PDF + bảng đều
@@ -645,7 +923,7 @@ with tab_sheet:
         st.caption("👉 Bấm vào một dòng để xem ảnh kết quả bên dưới. "
                    "Màu trên ảnh: **xanh = đúng**, **đỏ = sai**, **vàng = trống/tô nhiều**, "
                    "**cam = đáp án đúng của câu đó**, **xanh dương = mã đề suy từ đáp án**.")
-        sel = st.dataframe(rows_out, width="stretch", hide_index=True,
+        sel = st.dataframe(_df_str(rows_out), width="stretch", hide_index=True,
                            on_select="rerun", selection_mode="single-row",
                            key="sheet_res_table")
         picked = list(getattr(sel.selection, "rows", []) or []) \
@@ -658,10 +936,13 @@ with tab_sheet:
                 if wrong:
                     st.caption(f"{d0['file']}: " + " · ".join(
                         f"{p_}{q_}: key {exp} / làm {got or '—'}" for p_, q_, exp, got in wrong[:12]))
-                st.dataframe([{"phần": p_, "câu": (q_ if isinstance(q_, int) else f"{q_[0]}{q_[1]}"),
-                               "trạng thái": CTM.STATE_VI.get(st, st),
-                               "đáp án": exp, "bài làm": got}
-                              for (p_, q_), (st, exp, got) in d0["detail"].items()],
+                st.dataframe(_df_str([{"phần": p_,
+                                       "câu": (q_ if isinstance(q_, int)
+                                               else f"{q_[0]}{q_[1]}"),
+                                       "trạng thái": CTM.STATE_VI.get(st, st),
+                                       "đáp án": exp, "bài làm": got}
+                                      for (p_, q_), (st, exp, got)
+                                      in d0["detail"].items()]),
                              width="stretch", hide_index=True)
         if rendered:
             import zipfile
@@ -715,9 +996,9 @@ with tab_sheet:
 
 
 # ---------------- TAB 2: ĐÁP ÁN & QR ----------------
-with tab_key:
-    st.markdown("**1) Đặt tên + Upload Excel đáp án** — **2) sinh/quét QR** — "
-                "**3) chọn dòng key** rồi chấm bài ở tab '🟩 Chấm theo mẫu'.")
+if nav == LBL_KEY:
+    # (đã ẩn dòng hướng dẫn "1) Đặt tên… — 2) sinh/quét QR — 3) chọn dòng key…"
+    # theo yêu cầu 2026-11-05: "ẩn nội dung trong hình")
     reg = load_registry()
 
     # ---- 1. TÊN ĐÁP ÁN + UPLOAD ----
@@ -773,7 +1054,7 @@ with tab_key:
                 "Tên đáp án": reg[k].get("name") or reg[k].get("desc") or k,
                 "Ngày tạo": _fmt_ts(reg[k].get("ts", ""))}
                for i, k in enumerate(kids)]
-    ev = st.dataframe(df_rows, width="stretch", hide_index=True,
+    ev = st.dataframe(_df_str(df_rows), width="stretch", hide_index=True,
                       on_select="rerun", selection_mode="multi-row",
                       key="key_tbl")
     sel = []
