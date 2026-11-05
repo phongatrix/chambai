@@ -977,15 +977,51 @@ if nav == LBL_SHEET:
         rows_out = res["rows"]; row_meta = res["meta"]
         rendered = [Path(x) for x in res["rendered"]]
         details = res["details"]; stamp = res["stamp"]
-        st.success(f"Đã chấm {len(rows_out)} ảnh — lưu tại {res['outd']}")
+        # ---- TÁCH DANH SÁCH: đã chấm được / KHÔNG chấm được ----
+        _graded_rows, _graded_meta_idx = [], []
+        _failed_rows = []
+        for _i, _r in enumerate(rows_out):
+            if _i < len(row_meta) and row_meta[_i].get("img"):
+                _graded_rows.append(_r)
+                _graded_meta_idx.append(_i)
+            else:
+                _failed_rows.append({
+                    "file": _r.get("file", ""),
+                    "SBD": _r.get("SBD", "-"),
+                    "mã đề": _r.get("mã đề", "-"),
+                    "lý do không chấm được":
+                        (_r.get("ghi chú") or "không xác định")})
+        st.success(f"Đã chấm {len(_graded_rows)}/{len(rows_out)} ảnh — "
+                   f"lưu tại {res['outd']}")
+        if _failed_rows:
+            st.warning(f"⚠️ KHÔNG chấm được {len(_failed_rows)} ảnh — "
+                       "danh sách riêng bên dưới.")
         st.caption("👉 Bấm vào một dòng để xem ảnh kết quả bên dưới. "
                    "Màu trên ảnh: **xanh = đúng**, **đỏ = sai**, **vàng = trống/tô nhiều**, "
                    "**cam = đáp án đúng của câu đó**, **xanh dương = mã đề suy từ đáp án**.")
-        sel = st.dataframe(_df_str(rows_out), width="stretch", hide_index=True,
+        sel = st.dataframe(_df_str(_graded_rows), width="stretch", hide_index=True,
                            on_select="rerun", selection_mode="single-row",
                            key="sheet_res_table")
         picked = list(getattr(sel.selection, "rows", []) or []) \
             if hasattr(sel, "selection") else []
+        # ánh xạ chỉ số bảng (chỉ các trang đã chấm) -> chỉ số row_meta gốc
+        if picked:
+            picked = [_graded_meta_idx[p] for p in picked
+                      if p < len(_graded_meta_idx)]
+        if _failed_rows:
+            with st.expander(f"⛔ Danh sách {len(_failed_rows)} ảnh KHÔNG chấm "
+                             "được (bấm để xem)", expanded=bool(_failed_rows)):
+                st.dataframe(_df_str(_failed_rows), width="stretch",
+                             hide_index=True,
+                             key="sheet_failed_table")
+                st.download_button(
+                    "⬇️ Tải danh sách ảnh không chấm được (CSV)",
+                    data="\n".join(["file,SBD,mã đề,lý do"] +
+                                   [f'{f_["file"]},{f_["SBD"]},{f_["mã đề"]},'
+                                    f'"{f_["lý do không chấm được"]}"'
+                                    for f_ in _failed_rows]),
+                    file_name=f"anh_khong_cham_duoc_{stamp}.csv",
+                    mime="text/csv", key="sheet_failed_csv")
         if details:
             with st.expander("🔎 Vì sao ra điểm này? (chi tiết từng câu)", expanded=False):
                 d0 = details[0]
@@ -1043,7 +1079,8 @@ if nav == LBL_SHEET:
                                      data=Path(xls_p).read_bytes(),
                                      file_name=Path(xls_p).name,
                                      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        idx = picked[0] if picked and picked[0] < len(row_meta) else 0
+        idx = picked[0] if picked and picked[0] < len(row_meta) else \
+            (_graded_meta_idx[0] if _graded_meta_idx else 0)
         meta = row_meta[idx] if row_meta else None
         if meta and meta.get("img") and Path(meta["img"]).is_file():
             parts = [f"**Mã đề: {meta['made']}**"]
