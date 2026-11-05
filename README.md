@@ -1,5 +1,8 @@
 # Hệ Thống Chấm Trắc Nghiệm Bằng AI (OpenCV) — GÓI CHẠY LOCAL
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fengcheck.streamlit.app/)
+[![Deploy on Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/deploy?repository=phongatrix/fengcheck&branch=main&mainModule=streamlit_app.py)
+
 Chấm phiếu trả lời trắc nghiệm từ ảnh quét: chuẩn hóa ảnh → tự nhận loại phiếu
 → phát hiện ô tô → chấm điểm → đối chiếu KQ phần mềm cũ → xuất Excel + lưu CSDL lịch sử.
 
