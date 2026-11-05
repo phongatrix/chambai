@@ -643,8 +643,15 @@ if nav == LBL_SHEET:
                                          if gdrive_files else None)
     if _first is not None and len(TPL_CHOICES) > 1:
         try:
-            _sigd = (str(_first), _first.stat().st_size
-                     if hasattr(_first, "stat") else len(_first.getvalue()))
+            # KHOÁ CACHE THEO NỘI DUNG (tên + kích thước file) — KHÔNG dùng
+            # str(object): địa chỉ bộ nhớ bị reuse giữa 2 lần upload liên tiếp
+            # -> detection CŨ (vd mẫu 12 của lô trước) áp NHẦM cho lô mới
+            # (lỗi thật 19:46/19:50: lô test11 10_11 bị ép mẫu 12 -> 0/12).
+            if hasattr(_first, "getvalue"):
+                _sigd = (str(getattr(_first, "name", "")),
+                         len(_first.getvalue()))
+            else:
+                _sigd = (str(_first), _first.stat().st_size)
         except Exception:                                    # noqa
             _sigd = str(_first)
         if st.session_state.get("paper_det_sig") != _sigd:
@@ -717,6 +724,26 @@ if nav == LBL_SHEET:
                                  "hãy chụp lại ảnh rõ hơn (đủ 4 mốc đen ở góc).")
                         st.stop()
                     pr.empty()
+                    # ---- PHÒNG VỆ: chuẩn hoá THẤT BẠI TOÀN BỘ + template
+                    #      đang dùng khác template người dùng chọn ban đầu
+                    #      (do tự-dò chuyển) -> thử lại với template KIA ----
+                    _alt = [k for k in TPL_CHOICES if k != paper]
+                    if not any(ok_paths) and _alt and len(TPL_CHOICES) > 1:
+                        _alt_p = _alt[0]
+                        pr.progress(0.0, text=(
+                            f"Không khớp mẫu {TPL_CHOICES[paper][0]} — thử "
+                            f"{TPL_CHOICES[_alt_p][0]}..."))
+                        ok_paths, rep, ink_paths, extras = normalize_batch(
+                            pths, TPL_CHOICES[_alt_p][1], _alt_p, _key_sel,
+                            destn / "chuan_hoa", pr, ink=True,
+                            ink_only=not norm_on)
+                        pr.empty()
+                        if any(ok_paths):
+                            paper, tpl_path = _alt_p, TPL_CHOICES[_alt_p][1]
+                            st.session_state["paper_det"] = _alt_p
+                            st.info(f"📌 Đã tự chuyển sang mẫu "
+                                    f"'{TPL_CHOICES[_alt_p][0]}' vì ảnh chỉ "
+                                    "khớp mẫu này.")
                     st.session_state["prep_sig"] = sig
                     st.session_state["prep_res"] = {
                         "rows": rep,
