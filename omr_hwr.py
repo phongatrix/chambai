@@ -131,15 +131,18 @@ def cnn_read(warped, tpl_path, paper):
 
 # ---------- 4. GỌI CHUNG ----------
 
-def read_fields(warped, tpl_path, paper, api_key=None, read_stt=True):
+def read_fields(warped, tpl_path, paper, api_key=None, read_stt=True,
+                model=None):
     """Đọc SBD + STT viết tay. Gemini ưu tiên (đủ SBD + STT), CNN dự phòng.
 
+    model: model người dùng chọn ở tab Đáp án & QR (None = GEMINI_MODEL mặc
+    định, vẫn có chuỗi fallback).
     Trả {"SBD": str|None, "STT": str|None, "engine": "gemini"|"cnn"|"none"}."""
     if api_key:
         try:
             jpg = header_crop(warped)
             if jpg:
-                r = gemini_read(api_key, jpg)
+                r = gemini_read(api_key, jpg, model=model)
                 r["engine"] = "gemini"
                 # SBD Gemini đọc được nhưng CNN không — tin Gemini khi đủ dài
                 return r

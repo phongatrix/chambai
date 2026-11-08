@@ -14,7 +14,34 @@ Màu:  GREEN = đúng, RED = sai, YELLOW = trống hoặc tô nhiều đáp án.
 """
 import cv2
 import numpy as np
+import os
 from pathlib import Path
+
+# ---- CACHE ẢNH MẪU (2026-11-06): align_photo/best_orientation đọc MẪU từ đĩa
+# nhiều lần mỗi ảnh (tw ở align_photo, _small_circles đường cứu, build_id_cells,
+# _cells_from_file) — ảnh mẫu không bao giờ đổi giữa chừng trừ khi mtime đổi,
+# nên cache theo (path, mtime) là AN TOÀN và bỏ được hàng chục lần
+# decode PNG mỗi lô. Cache theo tiến trình — an toàn với fork (mỗi con một bản).
+_IMREAD_CACHE = {}
+
+
+def _imread_cached(path, flags=cv2.IMREAD_COLOR):
+    """cv2.imread có cache theo (đường_dẫn, mtime) — dùng cho ẢNH MẪU (không
+    dùng cho ảnh bài thi: mảng lớn, chỉ dùng 1 lần)."""
+    p = str(path)
+    try:
+        ck = (p, os.path.getmtime(p), flags)
+    except OSError:
+        return cv2.imread(p, flags)
+    im = _IMREAD_CACHE.get(ck)
+    if im is None:
+        im = cv2.imread(p, flags)
+        if im is not None:
+            if len(_IMREAD_CACHE) > 16:          # giới hạn RAM (mẫu ~200 KB/ảnh)
+                _IMREAD_CACHE.pop(next(iter(_IMREAD_CACHE)))
+            _IMREAD_CACHE[ck] = im
+    return im
+
 
 GREEN = (0, 170, 0)
 RED = (0, 0, 235)
@@ -50,6 +77,18 @@ PAPERS = {
         "p2_per_row": 5,
         "p2_y": 4,
     },
+    "moi": {         # MẪU MỚI 2025 (dựng từ ảnh chụp — build_moi_template.py):
+                     # 20 câu ABCD cột trái, 4 câu Đ/S (a-d), 8 câu điền số,
+                     # lưới MÃ ĐỀ 3 chữ số (SBD viết tay — đọc bằng omr_hwr).
+        "tên": "Mẫu mới 2025 (20 câu ABCD + 4 Đ/S + 8 điền số)",
+        "key_goi_y": "kmoidapan.xlsx",
+        # Lưới ô KHÔNG dò lại từ ảnh mẫu (ảnh mẫu là median của ảnh chụp, vòng
+        # in mảnh bị phai làm sót hàng) — đọc sẵn từ moi_cells.json do script
+        # build_moi_template.py dựng bằng LATTICE FIT (P1 20×4, P2 4×8, MD 3×10).
+        "cells_file": "moi_cells.json",
+        "p1_bands": None,
+        "p2_bands": None,
+    },
 }
 
 
@@ -59,7 +98,14 @@ def _upscaled_bubbles(path, scale=None):
     img = cv2.imread(str(path))
     if img is None:
         raise FileNotFoundError(path)
+    return _upscaled_bubbles_img(img, scale)
+
+
+def _upscaled_bubbles_img(img, scale=None):
+    """Như _upscaled_bubbles nhưng nhận ảnh có sẵn (không đọc đĩa)."""
     h, w = img.shape[:2]
+    if img.ndim == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     s = scale if scale else (3 if max(h, w) < 800 else 1)
     up = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC) if s != 1 else img
     import omr_fiducial as F
@@ -71,22 +117,33 @@ def _upscaled_bubbles(path, scale=None):
 _SQ_CACHE = {}
 
 
-def _square_candidates(path, thr=0.80):
+def _square_candidates(path, thr=0.80, min_area=20, key_md5=None):
     """Ứng viên ô đen vuông (mọi kích thước) — mask tính 1 lần, cache theo ảnh.
 
     Cache key với MẢNG (ndarray) phải là HASH NỘI DUNG: str(ndarray) bị numpy
     rút gọn (chỉ còn vài giá trị góc + kích thước) -> hai ảnh khác nhau cùng
     kích thước (vd các biến thể xoay có viền trắng giống nhau) va CHÙM key và
     dùng NHẦM ứng viên của ảnh trước — bug thật, ảnh hưởng best_orientation
-    (mỗi hướng xoay sinh 1 mảng cùng cỡ)."""
+    (mỗi hướng xoay sinh 1 mảng cùng cỡ).
+
+    key_md5: md5 nội dung MẢNG đã tính SẴN (align_photo tính 1 lần cho ảnh rồi
+    truyền xuống mọi dải kích thước — trước đây mỗi lần gọi hash lại toàn ảnh
+    ~15-25 MB, tới 36 lần/align_photo = ~1-3 s lãng phí; đo 2026-11-06).
+
+    min_area: sàn diện tích contour. Mặc định 20 (nguyên vẹn); đường CỨU
+    PHIẾU CỤT của align_photo dùng 10 để lấy thêm anchor khung PHẦN II/III
+    trên MẪU (ô 4-6px từng bị lọc — phiếu chụp cụt đáy mất 2 mốc góc dưới,
+    4 anchor khung không đủ để khớp 4/4)."""
     if isinstance(path, (str, bytes)) or hasattr(path, "__fspath__"):
-        img = cv2.imread(str(path))
-        key = ("f", str(path), thr)
+        img = _imread_cached(str(path))
+        key = ("f", str(path), thr, min_area)
     else:
         img = path
-        import hashlib
-        key = ("a", hashlib.md5(np.ascontiguousarray(img).tobytes()).hexdigest(),
-               thr)
+        if key_md5 is None:
+            import hashlib
+            key_md5 = hashlib.md5(
+                np.ascontiguousarray(img).tobytes()).hexdigest()
+        key = ("a", key_md5, thr, min_area)
     if key in _SQ_CACHE:
         return _SQ_CACHE[key]
     if img is None:
@@ -100,7 +157,7 @@ def _square_candidates(path, thr=0.80):
     out = []
     for c in cs:
         a = cv2.contourArea(c)
-        if a < 20:
+        if a < min_area:
             continue
         # minAreaRect: KHÍT với ô xoay BẤT KỲ góc nào (bounding box thẳng trục
         # làm fill = 1/(cosθ+sinθ)² — ô xoay >~9° rơi dưới 0.75 và biến mất,
@@ -119,9 +176,9 @@ def _square_candidates(path, thr=0.80):
     return out
 
 
-def _fiducial_squares(path, side=(6, 16), thr=0.80):
+def _fiducial_squares(path, side=(6, 16), thr=0.80, min_area=20, key_md5=None):
     """Lọc ứng viên theo dải kích thước cạnh."""
-    return [m for m in _square_candidates(path, thr)
+    return [m for m in _square_candidates(path, thr, min_area, key_md5)
             if side[0] <= m[2] <= side[1] and side[0] <= m[3] <= side[1]]
 
 
@@ -159,14 +216,56 @@ def _col_groups(bubbles, gap=12.0):
 _CELLS_CACHE = {}
 
 
+def _cells_from_file(paper, template_png):
+    """Lưới ô có SẴN của mẫu (cfg['cells_file']) — vd moi_cells.json do
+    build_moi_template.py dựng. Trả list [(phần, câu, lựa, x, y)] hoặc None.
+
+    Kiểm tra kích thước: file ghi toạ độ cho ảnh mẫu cỡ cụ thể; nếu ảnh mẫu
+    hiện tại khác cỡ (scale ≠ 1) thì toạ độ sai — trả None để không dùng."""
+    import json
+    cf = PAPERS.get(paper, {}).get("cells_file")
+    if not cf:
+        return None
+    path = Path(template_png).parent / cf
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception:                                            # noqa
+        return None
+    img = _imread_cached(str(template_png))
+    if img is None:
+        return None
+    w0, h0 = data.get("size") or [0, 0]
+    h, w = img.shape[:2]
+    if not w0 or not h0 or abs(w - w0) > 0.02 * w0 or abs(h - h0) > 0.02 * h0:
+        return None
+    # JSON không có TUPLE: câu P2 được lưu ["1","a"] (list) — dùng làm khoá
+    # dict ở mark_filled/build_answer_grid sẽ ném "unhashable type: 'list'".
+    # Đưa câu nhiều thành phần về tuple đúng chuẩn của build_template_cells.
+    out = []
+    for c in data.get("cells") or []:
+        if len(c) != 5:
+            continue
+        cq = c[1]
+        if isinstance(cq, (list, tuple)):
+            cq = tuple(int(v) if str(v).isdigit() else str(v) for v in cq)
+        out.append((c[0], cq, c[2], c[3], c[4]))
+    return out
+
+
 def build_template_cells(paper, template_png):
     """Lưới ô ngữ nghĩa của mẫu: [(phần, câu, lựa_chọn, x, y)]."""
     ck = (paper, str(template_png))
     if ck in _CELLS_CACHE:
         return _CELLS_CACHE[ck]
+    pre = _cells_from_file(paper, template_png)
+    if pre is not None:
+        _CELLS_CACHE[ck] = pre
+        return pre
     cfg = PAPERS[paper]
     bs = _upscaled_bubbles(template_png)
-    W = cv2.imread(str(template_png)).shape[1]
+    W = _imread_cached(template_png).shape[1]
     cells = []
     # ---- PHẦN I ----
     lo, hi = cfg["p1_bands"]
@@ -229,12 +328,14 @@ def build_answer_grid(paper, template_png, key):
         if part == "P1":
             exp = key.get("p1", {}).get(q) or key.get("p1", {}).get(str(q))
             answers[(part, q, opt)] = exp
-        else:
+        elif part == "P2":
             cq, yk = q
             exp = key.get("p2", {}).get((cq + off, yk))
             if exp is None:
                 exp = key.get("p2", {}).get((str(cq + off), yk))
             answers[(part, q, opt)] = exp
+        # MD/SBD (mẫu moi, cells_file): KHÔNG gắn đáp án ở đây — lưới ID đọc
+        # bằng omr_idscan/omr_hwr; để qua ngoài else tránh vấp câu int.
     return {"cells": cells, "answers": answers, "p2_offset": off}
 
 
@@ -249,8 +350,35 @@ def grid_summary(grid):
 
 # ---------- 3. CĂN KHỚP ẢNH VỚI MẪU ----------
 
-def _match_fiducials(tsq, psq, approx):
+# ---- THỐNG KÊ RANSAC (đo 2026-11-06): đếm số giả thuyết (k,l) đã duyệt mỗi
+# lần gọi — dùng để chọn trần max_hyp an toàn (chỉ ảnh pathology với hàng trăm
+# ứng viên dải rộng mới vượt trần; ảnh khỏe break sớm ở full-inlier).
+# Vài phép cộng int mỗi lần gọi — chi phí bằng không.
+_MF_STATS = {"calls": 0, "hyp_total": 0, "hyp_max": 0}
+
+# ---- TRẦN TỔNG GIẢ THUYẾT mỗi lần gọi _match_fiducials (2026-11-06) ----
+# Ảnh khỏe đo được tối đa ~1.2 nghìn giả thuyết/lần gọi (toàn bộ 42 ảnh test,
+# kể cả ảnh mờ/nghiêng — xem /tmp/omr_bench). Ảnh pathology (mờ nặng -> hàng
+# trăm ứng viên/dải) có thể sinh HÀNG TRIỆU giả thuyết × ma trận n×m mỗi cái
+# -> nổ hàng phút ("treo" user báo 2026-11-06). Trần 20k = gấp ~16 lần mức
+# cao nhất đo được -> KHÔNG BAO GIỜ kích hoạt trên ảnh thường, chỉ chặn nổ
+# tổ hợp. Khi chạm trần: dùng các giả thuyết đã thu (stage 2 vẫn chấm lại),
+# hành vi chỉ đổi trên ảnh vượt trần.
+_MF_MAX_HYP_TOTAL = 20000
+
+
+def _match_fiducials(tsq, psq, approx, ratio_band=(0.4, 2.5), max_hyp=None):
     """Ghép ô mẫu <-> ô ảnh bằng RANSAC trên CẶP ĐIỂM — BẤT BIẾN XOAY.
+
+    ratio_band: dải tỉ lệ khoảng cách cặp ảnh/cặp mẫu chấp nhận (thang ×
+    approx). Mặc định (0.4, 2.5) như cũ; căn-lưới-trực-tiếp dùng hẹp hơn
+    (0.65, 1.55) vì thang ảnh/mẫu gần đều -> giảm ~(2.5-1.55+0.65)/
+    (2.5-0.4) lần ứng viên (k,l), chống nổ tổ hợp khi m = vài trăm ring.
+
+    XÁC ĐỊNH: seed RNG toàn cục của OpenCV ĐẦU HÀM — không seed thì RANSAC
+    lấy mẫu phụ thuộc lịch sử gọi (normalize seed 1 lần/ảnh, nhưng re-selection/
+    xoay tỉnh gọi lại nhiều lần sau đó -> kết quả trôi giữa các run: cùng ảnh
+    run trước ra 4 cặp q=0.465, run sau rỗng).
 
     _quad4 chọn 4 đỉnh cực trị theo quy ước "ảnh gần thẳng": phiếu nghiêng
     5-30° làm cực trị rơi vào phần tử SAI (hộp mã đề, ô cạnh mép) -> H khớp
@@ -261,6 +389,7 @@ def _match_fiducials(tsq, psq, approx):
     đoán vị trí toàn bộ ô mẫu; ô ảnh gần nhất trong bán chịu tol tính 1 inlier
     (mỗi ô ảnh dùng 1 lần). Giả thuyết nhiều inlier nhất (≥4) thắng; trả
     (src 4 điểm mẫu, dst 4 điểm ảnh) trải rộng nhất để fit homography."""
+    cv2.setRNGSeed(20261106)
     T = np.float32([[m[0], m[1]] for m in tsq])
     Pp = np.float32([[m[0], m[1]] for m in psq])
     n, m_ = len(T), len(Pp)
@@ -274,15 +403,30 @@ def _match_fiducials(tsq, psq, approx):
     med_px = float(np.median([p_[2] for p_ in psq]))   # cỡ mốc trên ảnh
     tol_tight = max(8.0, 0.40 * med_px)                # ngưỡng KHÍT theo mốc
     hyps = []                     # (số inlier lỏng, keep, nearest)
+    _n_hyp = 0
+    _hyp_stop = False
     for i in range(n):
+        if _hyp_stop:
+            break
         for j in range(i + 1, n):
+            if _hyp_stop:
+                break
             dt = float(DT[i, j])
             if dt < dt_min:
                 continue
-            lo_d, hi_d = 0.4 * approx * dt, 2.5 * approx * dt
+            lo_d, hi_d = ratio_band[0] * approx * dt, ratio_band[1] * approx * dt
             kp, lp = np.where((DP >= lo_d) & (DP <= hi_d))
             kp, lp = kp[kp < lp], lp[kp < lp]
-            for k, l in zip(kp.tolist(), lp.tolist()):
+            # CAP hypothesis/cặp mẫu: bỏ cap thì m=vài trăm ring × dải rộng
+            # sinh hàng chục nghìn (k,l) mỗi cặp (i,j) — mỗi hypothesis tính
+            # ma trận dự đoán n×m -> nổ phút (đã đo 2026-11-06)
+            _kp_lp = list(zip(kp.tolist(), lp.tolist()))[:max_hyp] \
+                if max_hyp else list(zip(kp.tolist(), lp.tolist()))
+            for k, l in _kp_lp:
+                if _MF_MAX_HYP_TOTAL and _n_hyp >= _MF_MAX_HYP_TOTAL:
+                    _hyp_stop = True          # chạm trần tổng (xem hằng số ở đầu)
+                    break
+                _n_hyp += 1
                 vT, vP = T[j] - T[i], Pp[l] - Pp[k]
                 nT = float(np.linalg.norm(vT))
                 sp = float(np.linalg.norm(vP)) / max(1e-9, nT)
@@ -311,11 +455,17 @@ def _match_fiducials(tsq, psq, approx):
         if any(h[0] >= n for h in hyps):
             break
     if not hyps:
+        _MF_STATS["calls"] += 1
+        _MF_STATS["hyp_total"] += _n_hyp
+        _MF_STATS["hyp_max"] = max(_MF_STATS["hyp_max"], _n_hyp)
         return None
     # ---- STAGE 2: chấm lại bằng HOMOGRAPHY + ngưỡng KHÍT ----
     # similarity chỉ xấp xỉ phối cảnh (lệch tới vài % cỡ ảnh ở góc xa) nên
     # tol lỏng bắt thêm giả thuyết SAI; fit H thật từ inlier rồi đếm lại inlier
     # với ngưỡng khít theo cỡ mốc — giả thuyết đúng sẽ bứt lên tuyệt đối.
+    _MF_STATS["calls"] += 1
+    _MF_STATS["hyp_total"] += _n_hyp
+    _MF_STATS["hyp_max"] = max(_MF_STATS["hyp_max"], _n_hyp)
     hyps.sort(key=lambda h: -h[0])
     best_tight, best_pick = 3, None
     for _lo_n, keep, nearest in hyps[:6]:
@@ -401,12 +551,35 @@ def _blob_centers(photo):
     return np.float32(out) if out else np.zeros((0, 2), np.float32)
 
 
-def _ring_centers(photo):
+def _ring_ready(warped):
+    """Bản TĂNG NÉT chỉ dùng để DÒ RING trên warp mờ (không đổi ảnh chấm).
+
+    Ảnh chụp mờ (Laplacian 56-235 — 4/12 ảnh lô 2026-11-05) làm ring in mảnh
+    tan trong adaptiveThreshold: chỉ dò được 41/300+ vòng -> ring rate 0.16
+    dù warp ĐÚNG (đo bằng overlay 2026-11-05). CLAHE + unsharp khôi phục vành
+    ring; ảnh nét (≥ 400) đi qua nguyên vẹn như trước."""
+    try:
+        import omr_enhance as E
+        if E.blur_score(warped) < 400.0:
+            return E.enhance_blurry(warped)
+    except Exception:                                            # noqa
+        pass
+    return warped
+
+
+def _ring_centers(photo, accept_filled=False):
     """Tâm các VÒNG TRÒN IN (ring có đúng 1 lỗ con) — CHẶT hơn _blob_centers.
 
     _blob_centers nhận MỌI blob 6-120px (chữ số, khung, nét chữ) nên đếm
     'khớp lưới' quá dễ — phiếu in KHÁC layout vẫn đạt hit 1.0. Ring phải là
-    contour ngoài có đúng 1 lỗ con, kích thước/hình dạng hợp lý."""
+    contour ngoài có đúng 1 lỗ con, kích thước/hình dạng hợp lý.
+
+    accept_filled: nhận thêm BUBBLE ĐÃ TÔ ĐẬM (contour đặc tròn nhỏ 6-20px,
+    lõi TỐI) làm bằng chứng ring — học sinh tô BÚT ĐẬM làm ring mất lỗ, bộ
+    dò cũ loại hết (đo 041621: 44/80 ô P1 tô đậm -> ring rate trần 0.55;
+    các ô chưa tô vẫn khớp, ô tô đậm biến mất). Bật CHỈ cho mẫu moi
+    (ring gate) — ảnh dò khác layout vẫn bị chặn bởi TÍNH ĐỊNH VỊ: blob đặc
+    phải nằm ĐÚNG vị trí ô của mẫu mới tính khớp."""
     g = cv2.cvtColor(photo, cv2.COLOR_BGR2GRAY)
     # KHÔNG GaussianBlur ở đây: ring photocopy NHẠT (nét 1-2 px, xám 100-200)
     # bị blur làm tan trước adaptiveThreshold — mất ~90 % ring (đo: 545 → 36);
@@ -418,6 +591,13 @@ def _ring_centers(photo):
     out = []
     if hz is None:
         return np.zeros((0, 2), np.float32)
+    # số con của MỖI contour tính 1 LẦN bằng bincount — cách "sum(1 for q in
+    # hz[0] if q[3]==i)" trong vòng lặp là O(N²): ảnh warp lớn (mẫu moi 1218×1800,
+    # ~10⁵ contour) làm CHẬM 15 s/ảnh (đo bằng cProfile 2026-11-05)
+    hz_arr = np.asarray(hz[0], np.int64).reshape(-1, 4)
+    parents = hz_arr[:, 3]
+    kids_arr = (np.bincount(parents[parents >= 0], minlength=len(cs))
+                if len(parents) else np.zeros(len(cs), np.int64))
     for i, c in enumerate(cs):
         if hz[0][i][3] != -1:            # chỉ contour NGOÀI
             continue
@@ -425,7 +605,7 @@ def _ring_centers(photo):
         lo_s, hi_s = min(rw, rh), max(rw, rh)
         if not (6 <= hi_s <= 60 and 0.55 <= lo_s / hi_s <= 1.45):
             continue
-        kids = sum(1 for q in hz[0] if q[3] == i)
+        kids = int(kids_arr[i])
         if kids in (1, 2):
             # ring chuẩn (1 lỗ) hoặc ring CÓ DẤU CHẤM bên trong (2 con) —
             # bubble đã tô vẫn là mốc bám mẫu hợp lệ
@@ -442,6 +622,10 @@ def _ring_centers(photo):
             band_val = float(g[np.clip(c[:, 0, 1], 0, g.shape[0] - 1),
                                np.clip(c[:, 0, 0], 0, g.shape[1] - 1)].mean())
             if core_val - band_val > 25:
+                out.append((cx, cy))
+                continue
+            if accept_filled and 6 <= hi_s <= 20 and lo_s / hi_s >= 0.70:
+                # bubble đã tô đậm: tròn nhỏ, lõi tối — vẫn là ring IN đúng vị trí
                 out.append((cx, cy))
     return np.float32(out) if out else np.zeros((0, 2), np.float32)
 
@@ -561,11 +745,16 @@ def align_photo(photo_path, template_png, cells, photo=None, ref_cells=None,
     blobs = _blob_centers(ph)
     if len(blobs) < 20:
         return None, ph, 0.0
+    # md5 NỘI DUNG ảnh tính MỘT LẦN cho mọi dải kích thước bên dưới (xem
+    # docstring _square_candidates). Ảnh gốc của lượt retry-raw decoded lại từ
+    # đĩa ra CÙNG nội dung -> trùng md5 -> dò ứng viên được dùng lại từ cache.
+    import hashlib
+    _ph_md5 = hashlib.md5(np.ascontiguousarray(ph).tobytes()).hexdigest()
     # tìm dải kích thước mốc trong ảnh cho khớp mẫu (thang ảnh/mẫu ~ W_ảnh/W_mẫu)
     # Dải bắt đầu 18 px (trước đây 30): hỗ trợ ảnh chụp XA hơn — template 461 px
     # có mốc 8-9 px nên ảnh ~2-3.3× (mốc 18-30 px) trước đây không thể căn.
     # Các ô lớn (hộp mã đề 250 px+) vẫn bị chặn bởi hi = lo*2.2 và _quad4.
-    tw = cv2.imread(str(template_png)).shape[1]
+    tw = _imread_cached(template_png).shape[1]
     approx = ph.shape[1] / max(1, tw)          # ~7-8x
     best = None
     # ---- GHÉP MỐC RANSAC CẶP ĐIỂM (bất biến xoay/nghiêng) ----
@@ -576,7 +765,7 @@ def align_photo(photo_path, template_png, cells, photo=None, ref_cells=None,
                  key=lambda lo_: abs((lo_ + lo_ * 2.2) / 2.0 - exp_px))
     for lo in los:
         hi = int(lo * 2.2)
-        psq = _fiducial_squares(ph, side=(lo, hi))
+        psq = _fiducial_squares(ph, side=(lo, hi), key_md5=_ph_md5)
         if len(psq) < 4:
             continue
         mt = _match_fiducials(tsq, psq, approx)
@@ -595,7 +784,7 @@ def align_photo(photo_path, template_png, cells, photo=None, ref_cells=None,
         # dự phòng: quy ước cực trị cũ (ảnh gần thẳng) theo từng dải size
         for lo in range(18, 110, 8):
             hi = int(lo * 2.2)
-            psq = _fiducial_squares(ph, side=(lo, hi))
+            psq = _fiducial_squares(ph, side=(lo, hi), key_md5=_ph_md5)
             if len(psq) < 4:
                 continue
             dst = _quad4(psq)
@@ -609,6 +798,60 @@ def align_photo(photo_path, template_png, cells, photo=None, ref_cells=None,
             q = _quality(H, cells, blobs)
             if best is None or q > best[0]:
                 best = (q, H)
+    if best is None:
+        # ---- CỨU PHIẾU CỤT + ANCHOR MỞ RỘNG (2026-11-06): chỉ chạy khi
+        # KHÔNG khớp được (best is None). Trước đây chạy cả khi best < 0.75
+        # — hồi quy tốc độ 2026-11-06: best 0.6-0.7 PHỔ BIẾN trên ảnh thường
+        # -> rescue chạy với ~70% ảnh (~48 lần _match_fiducials/ảnh) làm lô
+        # 12 ảnh chậm 4-6 phút (người dùng báo "treo"). Case best yếu đã xử
+        # bằng raw-retry của normalize_to_template (ảnh gốc khớp tốt hơn bản
+        # enhance) — không cần rescue kép. Phiếu chụp cụt đáy (test11
+        # 121112) mất 2 mốc góc dưới -> 4 anchor khung (dải 6-16) không thể
+        # khớp 4/4.
+        # mất 2 mốc góc dưới -> 4 anchor khung (dải 6-16) không thể khớp 4/4.
+        # Nới min_area=10 lấy thêm anchor Ô KHUNG PHẦN II/III trên MẪU (ô
+        # 4-6px) — anchor nằm trong VÙNG NHÌN THẤY của ảnh nên đủ 4 inlier.
+        # Loại anchor lọt vào LƯỚI SBD/Mã đề (bubble 4-5px do threshold hoà
+        # lỗ cũng qua fill>0.85 ở cỡ nhỏ) bằng khoảng cách tới _small_circles.
+        # Chất lượng vẫn do _h_valid + ICP + ring gate chốt như thường.
+        # SEED CỐ ĐỊNH: RANSAC dùng RNG toàn cục — không seed thì khớp cứu
+        # trôi giữa các run (đã gặp: 1 lần ra 4 cặp q=0.465, lần sau rỗng).
+        cv2.setRNGSeed(20261106)
+        try:
+            tsq_x0 = _fiducial_squares(template_png, side=(3.5, 16),
+                                       min_area=10)
+            if len(tsq_x0) > len(tsq):
+                id_pts = [(m[0], m[1]) for m in _small_circles(
+                    _imread_cached(template_png))]
+                tsq_x = []
+                for m in sorted(tsq_x0, key=lambda z: -z[2] * z[3]):
+                    if any((m[0] - c[0]) ** 2 + (m[1] - c[1]) ** 2 < 12 ** 2
+                           for c in id_pts):
+                        continue
+                    if any((m[0] - t[0]) ** 2 + (m[1] - t[1]) ** 2 < 8 ** 2
+                           for t in tsq_x):
+                        continue
+                    tsq_x.append(m)
+                if len(tsq_x) >= 8:
+                    for lo in range(18, 110, 8):
+                        hi = int(lo * 2.2)
+                        psq = _fiducial_squares(ph, (lo, hi), key_md5=_ph_md5)
+                        if len(psq) < 4:
+                            continue
+                        mt = _match_fiducials(tsq_x, psq, approx)
+                        if mt is None:
+                            continue
+                        src_m, dst_m = mt
+                        H = cv2.getPerspectiveTransform(src_m, dst_m)
+                        if not _h_valid(H, cells, ph.shape, ref_cells):
+                            continue
+                        q = _quality(H, cells, blobs)
+                        if best is None or q > best[0]:
+                            best = (q, H)
+                        if q >= 0.90:
+                            break
+        except Exception:                                        # noqa
+            best = None
     if best is None:
         if not allow_sift:
             return None, ph, 0.0
@@ -869,7 +1112,14 @@ def build_id_cells(paper, template_png):
     ck = ("id", paper, str(template_png))
     if ck in _CELLS_CACHE:
         return _CELLS_CACHE[ck]
-    img = cv2.imread(str(template_png))
+    # mẫu có lưới ô có sẵn (cells_file) → lấy thẳng phần 'MD'/'SBD'
+    pre = _cells_from_file(paper, template_png)
+    if pre is not None:
+        idc = [c for c in pre if c[0] in ("MD", "SBD")]
+        if idc:
+            _CELLS_CACHE[ck] = idc
+            return idc
+    img = _imread_cached(template_png)
     if img is None:
         raise FileNotFoundError(template_png)
     Hh, Ww = img.shape[:2]

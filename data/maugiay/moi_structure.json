@@ -1,0 +1,43 @@
+{
+  "phan_i": {
+    "tu_cau": 1,
+    "so_cau": 20,
+    "lua_chon": "ABCD",
+    "vi_tri": "cot trai",
+    "y_top_frac": 0.49,
+    "y_bot_frac": 0.81
+  },
+  "phan_ii": {
+    "so_cau": 4,
+    "y_kieu": [
+      "a",
+      "b",
+      "c",
+      "d"
+    ],
+    "dang": "Dung/Sai",
+    "y_top_frac": 0.34,
+    "y_bot_frac": 0.45
+  },
+  "phan_iii": {
+    "so_cau": 8,
+    "dang": "dien_so",
+    "chu_so": "0-9",
+    "dau": [
+      "-",
+      ","
+    ],
+    "y_top_frac": 0.54,
+    "y_bot_frac": 0.96
+  },
+  "ma_de": {
+    "so_chu_so": 3,
+    "x_left_frac": 0.78,
+    "y_top_frac": 0.15,
+    "y_bot_frac": 0.33
+  },
+  "sbd": {
+    "cach_ghi": "viet tay",
+    "co_luoi_bubble": false
+  }
+}

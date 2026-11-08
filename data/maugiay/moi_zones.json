@@ -1,0 +1,241 @@
+{
+ "paper": "moi",
+ "tpl": [
+  406,
+  600
+ ],
+ "sidecar": null,
+ "zones": [
+  {
+   "color": "do",
+   "parts": [
+    "MD"
+   ],
+   "rects": [
+    [
+     331,
+     100,
+     360,
+     199
+    ]
+   ],
+   "n_bubble": 30,
+   "n_cells": 30,
+   "rect_detail": [
+    {
+     "rect": [
+      331,
+      100,
+      360,
+      199
+     ],
+     "part": "MD",
+     "n_bubble": 30,
+     "n_cells": 30
+    }
+   ]
+  },
+  {
+   "color": "hong",
+   "parts": [
+    "P1"
+   ],
+   "rects": [
+    [
+     51,
+     299,
+     96,
+     469
+    ]
+   ],
+   "n_bubble": 80,
+   "n_cells": 80,
+   "rect_detail": [
+    {
+     "rect": [
+      51,
+      299,
+      96,
+      469
+     ],
+     "part": "P1",
+     "n_bubble": 80,
+     "n_cells": 80
+    }
+   ]
+  },
+  {
+   "color": "duong",
+   "parts": [
+    "P2"
+   ],
+   "rects": [
+    [
+     130,
+     231,
+     308,
+     267
+    ]
+   ],
+   "n_bubble": 32,
+   "n_cells": 32,
+   "rect_detail": [
+    {
+     "rect": [
+      130,
+      231,
+      308,
+      267
+     ],
+     "part": "P2",
+     "n_bubble": 32,
+     "n_cells": 32
+    }
+   ]
+  }
+ ],
+ "cell_zone": {
+  "MD|1|0": "do",
+  "MD|1|1": "do",
+  "MD|1|2": "do",
+  "MD|1|3": "do",
+  "MD|1|4": "do",
+  "MD|1|5": "do",
+  "MD|1|6": "do",
+  "MD|1|7": "do",
+  "MD|1|8": "do",
+  "MD|1|9": "do",
+  "MD|2|0": "do",
+  "MD|2|1": "do",
+  "MD|2|2": "do",
+  "MD|2|3": "do",
+  "MD|2|4": "do",
+  "MD|2|5": "do",
+  "MD|2|6": "do",
+  "MD|2|7": "do",
+  "MD|2|8": "do",
+  "MD|2|9": "do",
+  "MD|3|0": "do",
+  "MD|3|1": "do",
+  "MD|3|2": "do",
+  "MD|3|3": "do",
+  "MD|3|4": "do",
+  "MD|3|5": "do",
+  "MD|3|6": "do",
+  "MD|3|7": "do",
+  "MD|3|8": "do",
+  "MD|3|9": "do",
+  "P1|1|A": "hong",
+  "P1|1|B": "hong",
+  "P1|1|C": "hong",
+  "P1|1|D": "hong",
+  "P1|2|A": "hong",
+  "P1|2|B": "hong",
+  "P1|2|C": "hong",
+  "P1|2|D": "hong",
+  "P1|3|A": "hong",
+  "P1|3|B": "hong",
+  "P1|3|C": "hong",
+  "P1|3|D": "hong",
+  "P1|4|A": "hong",
+  "P1|4|B": "hong",
+  "P1|4|C": "hong",
+  "P1|4|D": "hong",
+  "P1|5|A": "hong",
+  "P1|5|B": "hong",
+  "P1|5|C": "hong",
+  "P1|5|D": "hong",
+  "P1|6|A": "hong",
+  "P1|6|B": "hong",
+  "P1|6|C": "hong",
+  "P1|6|D": "hong",
+  "P1|7|A": "hong",
+  "P1|7|B": "hong",
+  "P1|7|C": "hong",
+  "P1|7|D": "hong",
+  "P1|8|A": "hong",
+  "P1|8|B": "hong",
+  "P1|8|C": "hong",
+  "P1|8|D": "hong",
+  "P1|9|A": "hong",
+  "P1|9|B": "hong",
+  "P1|9|C": "hong",
+  "P1|9|D": "hong",
+  "P1|10|A": "hong",
+  "P1|10|B": "hong",
+  "P1|10|C": "hong",
+  "P1|10|D": "hong",
+  "P1|11|A": "hong",
+  "P1|11|B": "hong",
+  "P1|11|C": "hong",
+  "P1|11|D": "hong",
+  "P1|12|A": "hong",
+  "P1|12|B": "hong",
+  "P1|12|C": "hong",
+  "P1|12|D": "hong",
+  "P1|13|A": "hong",
+  "P1|13|B": "hong",
+  "P1|13|C": "hong",
+  "P1|13|D": "hong",
+  "P1|14|A": "hong",
+  "P1|14|B": "hong",
+  "P1|14|C": "hong",
+  "P1|14|D": "hong",
+  "P1|15|A": "hong",
+  "P1|15|B": "hong",
+  "P1|15|C": "hong",
+  "P1|15|D": "hong",
+  "P1|16|A": "hong",
+  "P1|16|B": "hong",
+  "P1|16|C": "hong",
+  "P1|16|D": "hong",
+  "P1|17|A": "hong",
+  "P1|17|B": "hong",
+  "P1|17|C": "hong",
+  "P1|17|D": "hong",
+  "P1|18|A": "hong",
+  "P1|18|B": "hong",
+  "P1|18|C": "hong",
+  "P1|18|D": "hong",
+  "P1|19|A": "hong",
+  "P1|19|B": "hong",
+  "P1|19|C": "hong",
+  "P1|19|D": "hong",
+  "P1|20|A": "hong",
+  "P1|20|B": "hong",
+  "P1|20|C": "hong",
+  "P1|20|D": "hong",
+  "P2|(1, 'a')|D": "duong",
+  "P2|(1, 'a')|S": "duong",
+  "P2|(2, 'a')|D": "duong",
+  "P2|(2, 'a')|S": "duong",
+  "P2|(3, 'a')|D": "duong",
+  "P2|(3, 'a')|S": "duong",
+  "P2|(4, 'a')|D": "duong",
+  "P2|(4, 'a')|S": "duong",
+  "P2|(1, 'b')|D": "duong",
+  "P2|(1, 'b')|S": "duong",
+  "P2|(2, 'b')|D": "duong",
+  "P2|(2, 'b')|S": "duong",
+  "P2|(3, 'b')|D": "duong",
+  "P2|(3, 'b')|S": "duong",
+  "P2|(4, 'b')|D": "duong",
+  "P2|(4, 'b')|S": "duong",
+  "P2|(1, 'c')|D": "duong",
+  "P2|(1, 'c')|S": "duong",
+  "P2|(2, 'c')|D": "duong",
+  "P2|(2, 'c')|S": "duong",
+  "P2|(3, 'c')|D": "duong",
+  "P2|(3, 'c')|S": "duong",
+  "P2|(4, 'c')|D": "duong",
+  "P2|(4, 'c')|S": "duong",
+  "P2|(1, 'd')|D": "duong",
+  "P2|(1, 'd')|S": "duong",
+  "P2|(2, 'd')|D": "duong",
+  "P2|(2, 'd')|S": "duong",
+  "P2|(3, 'd')|D": "duong",
+  "P2|(3, 'd')|S": "duong",
+  "P2|(4, 'd')|D": "duong",
+  "P2|(4, 'd')|S": "duong"
+ }
+}

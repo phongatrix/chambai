@@ -50,6 +50,8 @@ for DEST in "${DESTS[@]}"; do
   # dữ liệu dùng chung: mẫu giấy + đáp án + key + CSDL
   mkdir -p "$DEST/data/maugiay" "$DEST/data/dapan"
   cp -f data/maugiay/*.png "$DEST/data/maugiay/" 2>/dev/null || true
+  # lưới ô của mẫu moi (build_moi_template.py) — không có thì mẫu moi KHÔNG chạy
+  cp -f data/maugiay/*.json "$DEST/data/maugiay/" 2>/dev/null || true
   cp -f data/dapan/*.xlsx "$DEST/data/dapan/" 2>/dev/null || true
   cp -f data/keys_builtin.json "$DEST/data/" 2>/dev/null || true
   cp -f data/omr_results.db    "$DEST/data/" 2>/dev/null || true

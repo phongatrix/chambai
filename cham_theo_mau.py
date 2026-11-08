@@ -122,6 +122,20 @@ def _finish_grade(ph, H, cells, key, paper, made, thresh, ids, q,
                 pp["SBD"] = fp
                 ids_full["positions"] = pp
                 ids_full["sbd_partial"] = True
+                # BUILD CHUỖI SBD từ các cột tự tin (2026-11-08 — user báo:
+                # "nhận dạng SBD chính xác nhưng không hiển thị SBD trên hình
+                # kết quả" — fallback_positions chỉ VẼ vòng mà không gán
+                # chuỗi). Đủ MỌI cột mới gán (có cột lệch → '?', nhường đường
+                # CNN viết tay); sbd_source ghi rõ "bubble (dự phòng)".
+                _cols = {}
+                for _c in fp:
+                    _cols[int(_c[0])] = str(_c[1])
+                if _cols:
+                    _n = max(_cols) + 1
+                    _s = "".join(_cols.get(i, "?") for i in range(_n))
+                    if "?" not in _s and len(_s) >= 4:
+                        sbd = _s
+                        ids_full["sbd_fallback"] = True
     except Exception:                                            # noqa
         pass
 
@@ -225,7 +239,8 @@ def _finish_grade(ph, H, cells, key, paper, made, thresh, ids, q,
         except Exception:                                        # noqa
             written = None
     sbd_source = ("viết tay" if (ids_full or {}).get("sbd_written")
-                  else ("bubble" if sbd else "không có"))
+                  else ("bubble (dự phòng)" if (ids_full or {}).get("sbd_fallback")
+                        else ("bubble" if sbd else "không có")))
     return {"photo": str(photo_path), "paper": paper, "made": use_de,
             "sbd_source": sbd_source,
             "pre_norm": None if pre is None else {"ok": pre["ok"],
@@ -263,12 +278,14 @@ def grade_prepared(img_path, paper, tpl_path, key, ids=None, made=None,
 
 
 def grade_one(photo_path, paper, tpl_path, key, made=None, min_quality=0.70,
-              thresh=None, decode_ids=True, normalize=False, norm_scale=2.0,
+              thresh=None, decode_ids=True, normalize=False, norm_scale=None,
               ink_only_input=False):
     """Chấm 1 ảnh với 1 mẫu + 1 bộ key. Trả dict kết quả hoặc None nếu không khớp mẫu.
 
     normalize=True: chạy BƯỚC TIỀN XỬ LÝ trước — tự xoay 4 hướng, căn mốc, warp
     ảnh về đúng khung mẫu rồi mới chấm (xem omr_prep.normalize_to_template).
+    norm_scale=None: tự chọn theo mẫu (omr_prep.norm_scale_for — moi cần 3.0
+    vì bubble nhỏ, sample cũ 2.0).
     ink_only_input=True: ảnh vào ĐÃ là bản chuẩn hoá của bước ⓪ -> dùng H=scale·I.
     """
     cells = keyed_cells(paper, tpl_path, key, made)
@@ -285,16 +302,19 @@ def grade_one(photo_path, paper, tpl_path, key, made=None, min_quality=0.70,
             return None
         tpl_img = cv2.imread(str(tpl_path))
         norm_scale = ph.shape[1] / float(tpl_img.shape[1])
-        H = np.array([[norm_scale, 0, 0], [0, norm_scale, 0], [0, 0, 1]],
-                     np.float64)
+        H = np.array([[norm_scale, 0, 0], [0, norm_scale, 0],
+                      [0, 0, 1]], np.float64)
         q = 1.0
         pre = {"ok": True, "quality": 1.0, "rot": 0, "reason": ""}
     elif normalize:
-        pre = PREP.normalize_to_template(photo_path, tpl_path, scale=norm_scale,
-                                         cells=cells, ink=True)
+        pre = PREP.normalize_to_template(
+            photo_path, tpl_path,
+            scale=norm_scale or PREP.norm_scale_for(paper),
+            cells=cells, ink=True)
         if pre.get("ok"):
             ph = pre["warped"]
-            H = np.array([[norm_scale, 0, 0], [0, norm_scale, 0], [0, 0, 1]], np.float64)
+            ns = norm_scale or PREP.norm_scale_for(paper)
+            H = np.array([[ns, 0, 0], [0, ns, 0], [0, 0, 1]], np.float64)
             q = float(pre["quality"])
             ids = pre.get("ids_result")
     if H is None:

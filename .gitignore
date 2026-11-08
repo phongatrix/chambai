@@ -21,10 +21,12 @@ data/gdrive_in/
 .DS_Store
 *.swp
 *.swo
+*.bak
+.zcode/
 
 # Git lock/tmp
 *.orig
 
 # Models lớn (>100MB vượt giới hạn GitHub)
 *.onnx
-data/gemini_key.txt
+data/gemini_key*.txt*
